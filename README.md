@@ -2,9 +2,9 @@
 
 # Cortex
 
-**Airtribe's organizational memory — built for AI.**
+**Organizational memory for LLMs.**
 
-Ingest sessions, code, and docs. Extract structured knowledge. Answer any org question via MCP.
+Ingest documents, code, and URLs. Extract structured knowledge. Answer any org question via MCP or REST.
 
 [![Node](https://img.shields.io/badge/Node.js-24-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -12,7 +12,7 @@ Ingest sessions, code, and docs. Extract structured knowledge. Answer any org qu
 [![MCP](https://img.shields.io/badge/MCP-v0.2.0-blueviolet)](https://modelcontextprotocol.io/)
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
 
-[The Problem](#the-problem) · [What Cortex Does](#what-cortex-does) · [Getting Started](#getting-started) · [How It Works](#how-it-works) · [MCP Tools](#mcp-tools) · [Status](#status--roadmap)
+[The Problem](#the-problem) · [What Cortex Does](#what-cortex-does) · [Getting Started](#getting-started) · [How It Works](#how-it-works) · [MCP Tools](#mcp-tools) · [FAQ](#faq)
 
 </div>
 
@@ -22,8 +22,8 @@ Ingest sessions, code, and docs. Extract structured knowledge. Answer any org qu
 
 The answer to most org questions lives across 3–4 sources simultaneously.
 
-A developer asks: *"Why can't this user start their session?"*
-The answer requires the validation logic in the codebase, the enrollment business rules in a doc, and a past support ticket with the workaround. No single place has the full picture. Every team member, every support agent, every AI tool starts from zero.
+A developer asks: *"How does our deploy pipeline handle rollbacks?"*
+The answer requires the CI/CD config in the codebase, the runbook in a doc, and a past incident postmortem with the workaround. No single place has the full picture. Every team member, every AI tool starts from zero.
 
 Cortex fixes this. It pulls from every source, distills knowledge into atomic, searchable facts, and serves it to any LLM-powered tool over MCP or REST — with a single query.
 
@@ -43,8 +43,8 @@ Most RAG systems only store raw chunks. Cortex stores three layers because diffe
 | Layer | What's Stored | Good For |
 |-------|--------------|----------|
 | **Chunks** | 512-token text blocks with vector embeddings | "Show me the full refund policy section" |
-| **Facts** | LLM-extracted atomic statements, categorized and deduplicated | "What are ALL conditions that prevent session start?" |
-| **Entity Graph** | Named nodes (sessions, courses, people, topics) with typed relations | "What has Rahul taught across all cohorts?" |
+| **Facts** | LLM-extracted atomic statements, categorized and deduplicated | "What are ALL conditions that trigger a deploy rollback?" |
+| **Entity Graph** | Named nodes (documents, people, topics) with typed relations | "What topics has this author written about?" |
 
 The same source document produces all three layers. Chunks give breadth. Facts give precision. The graph gives relationships.
 
@@ -58,8 +58,8 @@ Vector search alone misses exact identifiers. Keyword search alone misses semant
 | Query | Vector | Keyword | Hybrid |
 |-------|--------|---------|--------|
 | "how does authentication work?" | Finds semantically related content | Finds exact "authentication" mentions | Best of both |
-| `session_start_emails` table | Misses it — not semantically rich | Finds exact match | Keyword saves it |
-| "why sessions fail" | Finds related error patterns | Misses — "fail" isn't in "cannot start" | Vector saves it |
+| `user_sessions` table | Misses it — not semantically rich | Finds exact match | Keyword saves it |
+| "why deploys fail" | Finds related error patterns | Misses — "fail" isn't in "cannot deploy" | Vector saves it |
 
 After merging via **Reciprocal Rank Fusion (RRF)**, the top facts are enriched by traversing the entity graph — discovering related facts that vector search would never surface.
 
@@ -77,14 +77,14 @@ Facts are never blindly overwritten. Every new fact is compared against what's a
 | Contradicts existing | **Contradict** — mark old fact, add new one, flag for human review |
 | < 0.80 | **Add** — genuinely new knowledge |
 
-Contradictions are kept, not deleted. When two documents disagree, Cortex surfaces the conflict instead of silently picking one. Inspired by Guru's expert verification model.
+Contradictions are kept, not deleted. When two documents disagree, Cortex surfaces the conflict instead of silently picking one.
 
 </details>
 
 <details>
 <summary><strong>4-Stage Entity Deduplication</strong></summary>
 
-The entity graph is only useful if "Rahul", "Rahul Sharma", and "Rahul S." all resolve to the same node. Cortex runs a cascade before creating any new entity:
+The entity graph is only useful if "Alice", "Alice Chen", and "Alice C." all resolve to the same node. Cortex runs a cascade before creating any new entity:
 
 1. **Exact name match** — case-insensitive, O(1) indexed lookup
 2. **Fuzzy string match** — Levenshtein similarity ≥ 0.85, then LLM verifies
@@ -101,27 +101,30 @@ Merges are non-lossy: all relations redirect, fact links merge, mention counts s
 Every record belongs to a namespace. Every query filters on the consumer's allowed namespaces — a single `WHERE namespace = ANY(?)` clause, no join table.
 
 ```
-org/public      — FAQ, user-facing docs
-org/internal    — architecture, code patterns, incidents
-org/admin       — sensitive configs, financials
-product/lms     — LMS-specific session knowledge
-product/vision  — admin dashboard logic
+default         — general knowledge
+engineering     — architecture, code patterns, incidents
+docs/public     — user-facing documentation
+docs/internal   — internal runbooks, processes
 ```
 
-A WhatsApp bot sees only `org/public`. A developer's Claude Code sees everything. Same data, same query path, different views.
+A public-facing bot sees only `docs/public`. A developer's Claude Code sees everything. Same data, same query path, different views.
 
 </details>
 
 <details>
-<summary><strong>Session Vertical</strong></summary>
+<summary><strong>Format-Agnostic Ingestion</strong></summary>
 
-The first and deepest ingestion vertical. A single session pull spans 15+ mycohort-api tables — metadata, recording paths, VTT transcripts, chat logs, attendance records, feedback, analytics, video chapters, Zoom events, and mentorship context.
+Cortex auto-detects content format and applies the appropriate parser:
 
-The pipeline produces two outputs:
-- **PostgreSQL** — chunks and facts indexed for hybrid search
-- **DigitalOcean Spaces** — structured markdown files with cross-session memlinks, navigable by course, speaker, and topic
+| Format | Parser | Sections By |
+|--------|--------|-------------|
+| Markdown | `parsers/markdown.js` | Headings |
+| HTML | `parsers/html.js` | Stripped text blocks |
+| Source code | `parsers/code.js` | Functions / classes |
+| JSON | `parsers/json-parser.js` | Readable text |
+| Plain text | `parsers/text.js` | Paragraphs |
 
-Facts include the mentor's name in every statement ("Rahul covered normalization...") so queries like "what has Rahul taught?" work via both semantic search and graph traversal.
+Sources can be local files (single or glob), URLs, or raw text injected directly. The pipeline doesn't know or care about the input format — parsers handle that.
 
 </details>
 
@@ -134,7 +137,7 @@ Facts include the mentor's name in every statement ("Rahul covered normalization
 - **Node.js** 24+
 - **Docker** (for the Cortex PostgreSQL + pgvector container)
 - **Ollama** running locally with `nomic-embed-text` pulled
-- Read-only access to the mycohort-api PostgreSQL database
+- **Claude CLI** (`claude`) installed and authenticated (used for LLM calls)
 
 ### Setup
 
@@ -142,14 +145,15 @@ Facts include the mentor's name in every statement ("Rahul covered normalization
 # 1. Install dependencies
 npm install
 
-# 2. Copy and configure environment variables
-cp .env.example .env
+# 2. Configure environment variables
+cp .env .env.local   # edit with your settings
 
-# 3. Start the database (pgvector/pgvector:pg17 on port 5433)
+# 3. Start the database (pgvector/pgvector:pg17 on port 5434)
 docker compose up -d
 
 # 4. Run migrations
-npx knex migrate:latest
+cortex migrate
+# or: npx knex migrate:latest
 
 # 5. Pull the embedding model
 ollama pull nomic-embed-text
@@ -161,7 +165,7 @@ ollama pull nomic-embed-text
 # MCP server — for Claude Code (stdio transport)
 node src/server.js --mcp
 
-# REST API — for Tether, WhatsApp bot, dashboard
+# REST API — for external consumers
 node src/server.js
 
 # Development with auto-restart
@@ -189,11 +193,11 @@ Add to your project's `.mcp.json`:
 ## How It Works
 
 ```
-Data Sources (sessions, code, docs)
+Data Sources (files, URLs, raw text)
         │
         ▼
- Ingestion Pipeline
- fetch → compile → chunk+embed → extract facts → link entities → generate MD
+ Ingestion Pipeline (6 steps)
+ parse → hash → chunk+embed → extract facts → link entities → generate MD
         │
         ▼
  Three-Layer Knowledge Store (PostgreSQL + pgvector)
@@ -201,25 +205,22 @@ Data Sources (sessions, code, docs)
  ├── fact        — atomic statements, AUDM-deduplicated, confidence-scored
  └── entity/relation — typed graph, 4-stage dedup, temporal tracking
         │
-        ├── MCP Server (stdio)  ──► Claude Code (developers)
-        └── REST API (HTTP)     ──► Tether, WhatsApp bot, dashboard
+        ├── MCP Server (stdio)  ──► Claude Code
+        └── REST API (HTTP)     ──► External consumers
 ```
 
-Cortex runs two database connections — its own PostgreSQL for knowledge storage, and a read-only connection to mycohort-api for ingestion. The LLM calls (fact extraction, AUDM, entity linking) happen at ingestion time. Search is pure database queries — no LLM latency at query time.
+Cortex uses a single PostgreSQL database with pgvector for all knowledge storage. LLM calls (fact extraction, AUDM decisions, entity verification) happen at ingestion time via the Claude CLI. Search is pure database queries — no LLM latency at query time.
 
 <details>
-<summary><strong>Session Pipeline (9 steps)</strong></summary>
+<summary><strong>Ingestion Pipeline (6 steps)</strong></summary>
 
 ```
-[1/9] Fetch session data — parallel queries across 15+ mycohort-api tables
-[2/9] Download remote content — VTT transcripts + chat logs from DigitalOcean
-[3/9] Compile into unified SessionProfile
-[4/9] Chunk + embed — section-aware splitting, batch embed via Ollama
-[5/9] Extract facts — Claude Haiku, structured output via tool_use
-[6/9] AUDM deduplication — compare each fact against existing knowledge
-[7/9] Link entities — 4-stage dedup cascade + typed relations
-[8/9] Generate markdown — structured session file with memlinks, upload to DO Spaces
-[9/9] Update indexes — _index.md, _by-course/, _by-speaker/
+[1/6] Parse content       — auto-detect format, extract structured sections
+[2/6] Check for changes   — SHA-256 content hash, skip unchanged documents
+[3/6] Chunk + embed       — section-aware splitting, batch embed via Ollama
+[4/6] Extract facts       — LLM-based atomic fact extraction with configurable prompts
+[5/6] Link entities       — 4-stage dedup cascade + typed relations
+[6/6] Generate markdown   — structured knowledge file to local filesystem or S3
 ```
 
 </details>
@@ -230,32 +231,42 @@ Cortex runs two database connections — its own PostgreSQL for knowledge storag
 ```
 src/
 ├── ingestion/
-│   ├── pipelines/session/    # Session vertical (index.js is the only public API)
-│   ├── chunker.js            # Format-aware text splitting (shared)
-│   └── embedder.js           # Ollama/OpenAI abstraction
+│   ├── pipeline.js              # Generic document ingestion orchestrator
+│   ├── parsers/                 # Format-specific: markdown, text, HTML, code, JSON
+│   ├── sources/                 # Content connectors: file, URL, raw
+│   ├── chunker.js               # Format-aware text splitting
+│   └── embedder.js              # Ollama/OpenAI embedding abstraction
 │
 ├── memory/
-│   ├── facts/                # Fact CRUD + AUDM + entity-linker + categories
-│   ├── entities/             # Entity CRUD + resolver + fuzzy/embedding matchers
-│   │                         # + merger + linker + relations + traversal
-│   ├── chunks/               # Chunk CRUD
-│   ├── documents/            # Document registry + hash tracking
-│   └── search/               # vector + keyword + hybrid (RRF) + graph-enhancement
+│   ├── facts/                   # Fact CRUD + AUDM dedup + entity-linker + categories
+│   ├── entities/                # Entity CRUD + resolver + fuzzy/embedding matchers
+│   │                            # + merger + linker + relations + traversal
+│   ├── chunks/                  # Chunk CRUD
+│   ├── documents/               # Document registry + hash tracking
+│   └── search/                  # vector + keyword + hybrid (RRF) + graph-enhancement
 │
 ├── mcp/
-│   ├── server.js             # Tool registration, stdio transport (v0.2.0)
-│   └── tools/                # 7 tools — thin wrappers over domain logic
+│   ├── server.js                # Tool registration, stdio transport
+│   └── tools/                   # 7 tools — thin wrappers over domain logic
 │
 ├── generators/
-│   ├── markdown/             # Session MD renderer + index file generator
-│   └── uploader.js           # DigitalOcean Spaces upload
+│   ├── markdown/                # Knowledge file renderer + index generators
+│   └── output.js                # Output storage (local filesystem or S3)
+│
+├── api/
+│   ├── auth.js                  # API key auth plugin + key management
+│   └── routes/                  # ingest, search, entities, facts, documents, status
 │
 ├── db/
-│   ├── cortex.js             # Read/write, camelCase mappers
-│   ├── mycohort.js           # Read-only, for ingestion
-│   └── migrations/           # 9 .cjs migration files
+│   ├── cortex.js                # Knex connection, camelCase mappers
+│   └── migrations/              # 10 .cjs migration files
 │
-└── lib/                      # query-validator, pii-filter, claude-cli, errors
+├── lib/                         # LLM wrapper, error classes
+├── scripts/                     # ingest.js, test-search.js
+├── cli.js                       # CLI (cortex ingest|search|status|migrate|reset|keys)
+├── config.js                    # Environment config + defaults
+├── app.js                       # Fastify app setup
+└── server.js                    # Entry point (--mcp for MCP, else REST)
 ```
 
 </details>
@@ -267,11 +278,12 @@ src/
 |:------|:-----------|
 | **Runtime** | Node.js 24 (ES modules) |
 | **Framework** | Fastify 5 |
-| **Database** | PostgreSQL 17 + pgvector (Docker, port 5433) |
+| **Database** | PostgreSQL 17 + pgvector (Docker, port 5434) |
 | **ORM** | Knex.js 3 with camelCase ↔ snake_case mappers |
 | **Embeddings** | Ollama `nomic-embed-text` 768d (swappable to OpenAI) |
-| **Fact extraction** | Claude Haiku via `@anthropic-ai/sdk` (tool_use, ~$0.001/doc) |
+| **Fact extraction** | Claude CLI (haiku/sonnet models, spawned as subprocess) |
 | **MCP** | `@modelcontextprotocol/sdk` stdio transport |
+| **Validation** | Zod (MCP tool schemas) |
 | **Utilities** | lodash-es, dayjs |
 | **Testing** | Vitest |
 
@@ -288,7 +300,7 @@ src/
 | Tool | What it does |
 |------|-------------|
 | `search` | Hybrid semantic + keyword search over facts and chunks. Supports `minConfidence` and `useGraph` for entity-enriched results. |
-| `search_entity` | Find entities by name or list all entities of a given type (session, course, person, topic). |
+| `search_entity` | Find entities by name or list all entities of a given type (document, person, topic). |
 
 ### Traversal
 
@@ -308,34 +320,54 @@ src/
 | Tool | What it does |
 |------|-------------|
 | `status` | Knowledge base stats — document, chunk, fact, and entity counts. |
-| `ingest` | Trigger the full 9-step ingestion pipeline for a session UID. |
+| `ingest` | Ingest a document into the knowledge base. Accepts raw content, a file path, or a URL. |
 
 Tools are designed to chain: `search` → `get_entity_context` → `traverse_graph` → deeper facts.
 
 ---
 
-## Status & Roadmap
+## REST API
 
-**What's done:**
+Auth: Bearer token via `Authorization` header. If no API keys exist in the database, auth is bypassed (dev mode).
 
-- [x] PostgreSQL schema + 9 migrations (document, chunk, fact, entity, relation, fact_entity, history)
-- [x] Embedder service — Ollama with OpenAI fallback, single interface
-- [x] Session pipeline — 9-step, covers 15+ mycohort-api tables, VTT/chat from DO Spaces
-- [x] Hybrid search — pgvector cosine + tsvector ts_rank + RRF merge
-- [x] Graph-enhanced search — entity traversal enriches top results
-- [x] Fact extraction — Claude Haiku, structured output, 6 session-specific categories
-- [x] AUDM deduplication — auto-skip, auto-add, LLM arbitration, contradiction tracking
-- [x] 4-stage entity deduplication — exact → fuzzy → embedding → create
-- [x] Entity graph — 4 types, 5 relation types, temporal tracking, non-lossy merge
-- [x] Markdown generation + DigitalOcean upload with memlinked index files
-- [x] MCP server v0.2.0 — 7 tools in 4 tiers
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/ingest` | Ingest a single document (content, URL, or file path) |
+| `POST` | `/api/ingest/batch` | Ingest multiple documents |
+| `GET` | `/api/search` | Hybrid search (`query`, `limit`, `namespaces`, `useGraph`, `minConfidence`) |
+| `GET` | `/api/entities` | List/search entities (`query`, `entityType`, `namespace`, `limit`) |
+| `GET` | `/api/entities/:id` | Entity detail with relations + facts |
+| `GET` | `/api/entities/:id/neighbors` | Entity neighbors (`depth`, `limit`) |
+| `GET` | `/api/entities/:id/related` | Related entities (`maxDepth`, `relationType`, `limit`) |
+| `GET` | `/api/graph/path` | Shortest path between entities (`from`, `to`, `maxDepth`) |
+| `GET` | `/api/facts/:uid` | Fact detail with entities, relations, source documents |
+| `GET` | `/api/documents` | List documents (`namespace`, `sourceType`, `limit`) |
+| `GET` | `/api/documents/:uid` | Document detail |
+| `DELETE` | `/api/documents/:uid` | Delete a document |
+| `GET` | `/api/status` | Knowledge base stats (`namespace`) |
+| `GET` | `/health` | Health check |
 
-**What's next:**
+---
 
-- [ ] Bulk ingestion with BullMQ (parallel processing, two-phase pipeline)
-- [ ] REST API with namespace-based access control
-- [ ] Connect tether-agent (Slack), WhatsApp bot, admin dashboard
-- [ ] Additional verticals: code ingestion, document ingestion
+## CLI
+
+```bash
+cortex ingest <file|url|glob> [options]    # Ingest documents
+  --namespace=<ns>                          # Target namespace
+  --skip-facts                              # Skip fact extraction
+  --skip-entities                           # Skip entity linking
+  --skip-markdown                           # Skip markdown generation
+
+cortex search "query" [options]            # Search the knowledge base
+  --namespace=<ns>                          # Filter by namespace
+  --limit=<n>                               # Max results (default: 10)
+  --no-graph                                # Disable graph enhancement
+
+cortex status [--namespace=<ns>]           # Knowledge base stats
+cortex migrate [--rollback]                # Run/rollback migrations
+cortex reset --confirm                     # Reset database (drops all data)
+cortex keys list|create|revoke             # Manage API keys
+```
 
 ---
 
@@ -351,14 +383,14 @@ Vector databases store chunks and let you search by similarity. That's Layer 1. 
 <details>
 <summary><strong>Why PostgreSQL over a dedicated graph database like Neo4j?</strong></summary>
 
-The entity graph at Airtribe's scale (thousands of entities, not millions) is well within what recursive CTEs on PostgreSQL can handle. Adding Neo4j would mean a third database dependency. pgvector gives us vector search on the same rows as keyword search, in one query, with no joins.
+The entity graph at typical org scale (thousands of entities, not millions) is well within what recursive CTEs on PostgreSQL can handle. Adding Neo4j would mean a second database dependency. pgvector gives us vector search on the same rows as keyword search, in one query, with no joins.
 
 </details>
 
 <details>
-<summary><strong>What happens when the same session is ingested twice?</strong></summary>
+<summary><strong>What happens when the same document is ingested twice?</strong></summary>
 
-SHA-256 content hashing means re-ingesting an unchanged session is a no-op — detected and skipped in milliseconds. If the content changed, old chunks are deleted and recreated, new facts go through AUDM (duplicates skip, updates merge, contradictions flag), and the markdown file is regenerated.
+SHA-256 content hashing means re-ingesting an unchanged document is a no-op — detected and skipped in milliseconds. If the content changed, old chunks are deleted and recreated, new facts go through AUDM (duplicates skip, updates merge, contradictions flag), and the markdown file is regenerated.
 
 </details>
 
@@ -382,14 +414,12 @@ Yes. Set `EMBEDDING_PROVIDER=openai` and `OPENAI_API_KEY` in your `.env`. The em
 
 Read [CLAUDE.md](./CLAUDE.md) before writing any code — it covers service boundaries, naming conventions, and coding standards in full.
 
-The core rule: **domain stores own their logic**. The session pipeline calls `memory/facts/store.js` to save facts; it never writes to the database directly. MCP tools parse input, call the domain function, and format the response — no business logic.
-
-New verticals get their own folder under `src/ingestion/pipelines/`. The memory layer (`facts/`, `entities/`, `search/`) is vertical-agnostic and stays unchanged.
+The core rule: **domain stores own their logic**. The ingestion pipeline calls `memory/facts/store.js` to save facts; it never writes to the database directly. MCP tools and API routes parse input, call the domain function, and format the response — no business logic.
 
 ---
 
 <div align="center">
 
-Built at [Airtribe](https://airtribe.network) · Powered by [pgvector](https://github.com/pgvector/pgvector), [Claude](https://anthropic.com), and [MCP](https://modelcontextprotocol.io)
+Powered by [pgvector](https://github.com/pgvector/pgvector), [Claude](https://anthropic.com), and [MCP](https://modelcontextprotocol.io)
 
 </div>
