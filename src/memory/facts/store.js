@@ -1,0 +1,197 @@
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+
+import cortexDb from '../../db/cortex.js';
+import { embed } from '../../ingestion/embedder.js';
+import { prompt as llmPrompt } from '../../lib/llm.js';
+import config from '../../config.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const AUDM_PROMPT_PATH = path.join(__dirname, '../../../prompts/audm-decision.md');
+
+// Paraphrased content with nomic-embed-text typically lands 0.75-0.88.
+const SKIP_THRESHOLD = 0.88;
+const AMBIGUOUS_THRESHOLD = 0.65;
+
+/**
+ * AUDM pipeline: Add, Update, Delete (contradict), or Merge.
+ * For each fact, checks similarity against existing facts and decides what to do.
+ */
+async function saveFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection }) {
+  const embedding = await embed(content);
+  const similar = await findSimilar(embedding, { namespace });
+
+  if (!similar.length) {
+    const fact = await insertFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection, embedding });
+    return { action: 'ADD', fact };
+  }
+
+  const topMatch = similar[0];
+
+  if (topMatch.similarity >= SKIP_THRESHOLD) {
+    return { action: 'SKIP', existing: topMatch };
+  }
+
+  if (topMatch.similarity >= AMBIGUOUS_THRESHOLD) {
+    const decision = await audmDecide(content, topMatch.content);
+
+    if (decision === 'UPDATE') {
+      const oldContent = topMatch.content;
+      await updateFact(topMatch.id, { content, category, confidence, sourceDocumentIds, embedding });
+      await recordHistory({ targetType: 'fact', targetId: topMatch.id, event: 'UPDATE', oldContent, newContent: content, triggeredBy: `audm:sim=${topMatch.similarity.toFixed(3)}` });
+      return { action: 'UPDATE', existingId: topMatch.id };
+    }
+
+    if (decision === 'CONTRADICT') {
+      const fact = await insertFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection, embedding });
+      await markContradicted(topMatch.id, fact.id);
+      await recordHistory({ targetType: 'fact', targetId: topMatch.id, event: 'CONTRADICT', oldContent: topMatch.content, newContent: content, triggeredBy: `audm:sim=${topMatch.similarity.toFixed(3)}` });
+      return { action: 'CONTRADICT', fact, contradictedId: topMatch.id };
+    }
+  }
+
+  const fact = await insertFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection, embedding });
+  return { action: 'ADD', fact };
+}
+
+async function audmDecide(newContent, existingContent) {
+  const systemPrompt = await readFile(AUDM_PROMPT_PATH, 'utf8');
+
+  const input = `${systemPrompt}\n\n**EXISTING FACT:** ${existingContent}\n\n**NEW FACT:** ${newContent}`;
+  const text = await llmPrompt(input, { model: config.llm.decisionModel });
+
+  const upper = text.trim().toUpperCase();
+  if (upper.includes('UPDATE')) return 'UPDATE';
+  if (upper.includes('CONTRADICT')) return 'CONTRADICT';
+  return 'ADD';
+}
+
+// ── Core CRUD ───────────────────────────────────────────────────────────────
+
+async function insertFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection, embedding }) {
+  const uid = `fact-${randomUUID().slice(0, 8)}`;
+
+  const [fact] = await cortexDb('fact')
+    .insert({
+      uid,
+      content,
+      category,
+      confidence: confidence || 'medium',
+      namespace,
+      status: 'active',
+      sourceDocumentIds: sourceDocumentIds || [],
+      sourceSection: sourceSection || null,
+      embedding: embedding ? `[${embedding.join(',')}]` : null,
+    })
+    .returning('*');
+
+  await cortexDb.raw(`
+    UPDATE fact
+    SET search_vector = to_tsvector('english', content)
+    WHERE id = ?
+  `, [fact.id]);
+
+  return fact;
+}
+
+async function updateFact(factId, { content, category, confidence, sourceDocumentIds, embedding }) {
+  await cortexDb('fact')
+    .where({ id: factId })
+    .update({
+      content,
+      category,
+      confidence,
+      sourceDocumentIds,
+      embedding: embedding ? `[${embedding.join(',')}]` : undefined,
+    });
+
+  await cortexDb.raw(`
+    UPDATE fact
+    SET search_vector = to_tsvector('english', content)
+    WHERE id = ?
+  `, [factId]);
+}
+
+async function findByUid(uid) {
+  const [fact] = await cortexDb('fact').where({ uid });
+  return fact || null;
+}
+
+async function listByCategory(category, { namespace, limit = 50 } = {}) {
+  const query = cortexDb('fact')
+    .where({ category, status: 'active' })
+    .orderBy('createdAt', 'desc')
+    .limit(limit);
+
+  if (namespace) query.where({ namespace });
+  return query;
+}
+
+async function listByDocument(documentId) {
+  return cortexDb('fact')
+    .whereRaw('? = ANY(source_document_ids)', [documentId])
+    .where({ status: 'active' })
+    .orderBy('createdAt', 'desc');
+}
+
+async function markContradicted(factId, contradictedById) {
+  await cortexDb('fact')
+    .where({ id: factId })
+    .update({ status: 'contradicted', contradictedById });
+}
+
+async function markSuperseded(factId, supersededById) {
+  await cortexDb('fact')
+    .where({ id: factId })
+    .update({ status: 'superseded', supersededById });
+}
+
+async function findSimilar(embedding, { namespace, threshold = AMBIGUOUS_THRESHOLD, limit = 5 }) {
+  const vec = `[${embedding.join(',')}]`;
+
+  const { rows } = await cortexDb.raw(`
+    SELECT id, uid, content, category, status,
+           1 - (embedding <=> ?) as similarity
+    FROM fact
+    WHERE namespace = ?
+      AND status = 'active'
+      AND embedding IS NOT NULL
+      AND 1 - (embedding <=> ?) >= ?
+    ORDER BY embedding <=> ?
+    LIMIT ?
+  `, [vec, namespace, vec, threshold, vec, limit]);
+
+  return rows;
+}
+
+async function recordHistory({ targetType, targetId, event, oldContent, newContent, triggeredBy }) {
+  await cortexDb('history').insert({
+    targetType,
+    targetId,
+    event,
+    oldContent: oldContent || null,
+    newContent: newContent || null,
+    triggeredBy: triggeredBy || null,
+  });
+}
+
+async function getFactCount(namespace) {
+  const query = cortexDb('fact').where({ status: 'active' });
+  if (namespace) query.where({ namespace });
+  const [{ count }] = await query.count('id as count');
+  return Number(count);
+}
+
+export {
+  saveFact,
+  insertFact,
+  findByUid,
+  listByCategory,
+  listByDocument,
+  markContradicted,
+  markSuperseded,
+  findSimilar,
+  getFactCount,
+};

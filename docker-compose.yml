@@ -1,0 +1,15 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: cortex-gen-db
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: cortex-gen
+      POSTGRES_USER: cortex_app
+      POSTGRES_PASSWORD: cortex_pass
+    volumes:
+      - cortex_gen_data:/var/lib/postgresql/data
+
+volumes:
+  cortex_gen_data:

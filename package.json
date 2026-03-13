@@ -1,0 +1,36 @@
+{
+  "name": "cortex",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Organizational memory and context layer for LLMs",
+  "bin": {
+    "cortex": "src/cli.js"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "vitest",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "migrate": "knex migrate:latest",
+    "migrate:rollback": "knex migrate:rollback",
+    "migrate:make": "knex migrate:make"
+  },
+  "keywords": ["rag", "knowledge-base", "mcp", "llm", "context-layer", "pgvector"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+"@modelcontextprotocol/sdk": "^1.27.1",
+    "dayjs": "^1.11.19",
+    "dotenv": "^17.3.1",
+    "fastify": "^5.8.2",
+    "knex": "^3.1.0",
+    "lodash-es": "^4.17.23",
+    "pg": "^8.20.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "eslint": "^10.0.3",
+    "vitest": "^4.0.18"
+  }
+}
