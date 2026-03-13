@@ -4,7 +4,13 @@ import { fetchSource } from '../../ingestion/sources/url.js';
 
 async function ingestRoutes(app) {
   app.post('/api/ingest', async (request, reply) => {
-    const { content, url, filePath, title, namespace, sourceType, skipFacts, skipEntities, skipMarkdown } = request.body || {};
+    const {
+      content, url, filePath,
+      title, namespace, sourceType, sourcePath,
+      metadata,
+      skipFacts, skipEntities, skipMarkdown,
+      categories, entities,
+    } = request.body || {};
 
     if (!content && !url && !filePath) {
       return reply.code(400).send({ error: 'Provide content, url, or filePath' });
@@ -19,26 +25,28 @@ async function ingestRoutes(app) {
       source = {
         content,
         title: title || 'Untitled',
-        sourcePath: `raw/${Date.now()}`,
+        sourcePath: sourcePath || `raw/${Date.now()}`,
         sourceType: sourceType || 'raw',
         contentType: 'text/plain',
-        metadata: {},
+        metadata: metadata || {},
       };
     }
 
-    const ns = namespace || (request.namespaces?.[0]);
+    const ns = namespace || request.namespaces?.[0];
 
     const result = await ingestDocument({
       content: source.content,
       title: title || source.title,
-      sourcePath: source.sourcePath,
+      sourcePath: sourcePath || source.sourcePath,
       sourceType: sourceType || source.sourceType,
       contentType: source.contentType,
       namespace: ns,
-      metadata: source.metadata,
+      metadata: { ...source.metadata, ...metadata },
       skipFacts: skipFacts || false,
       skipEntities: skipEntities || false,
       skipMarkdown: skipMarkdown || false,
+      categories,
+      entities,
     });
 
     return result;
@@ -64,6 +72,8 @@ async function ingestRoutes(app) {
           skipFacts: doc.skipFacts || false,
           skipEntities: doc.skipEntities || false,
           skipMarkdown: doc.skipMarkdown || false,
+          categories: doc.categories,
+          entities: doc.entities,
         });
         results.push({ title: doc.title, status: result.skipped ? 'skipped' : 'ingested', ...result });
       } catch (err) {

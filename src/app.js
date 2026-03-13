@@ -8,6 +8,7 @@ import entityRoutes from './api/routes/entities.js';
 import factRoutes from './api/routes/facts.js';
 import statusRoutes from './api/routes/status.js';
 import documentRoutes from './api/routes/documents.js';
+import connectionRoutes from './api/routes/connections.js';
 
 function buildApp() {
   const app = Fastify({
@@ -25,6 +26,7 @@ function buildApp() {
   app.register(factRoutes);
   app.register(statusRoutes);
   app.register(documentRoutes);
+  app.register(connectionRoutes);
 
   return app;
 }

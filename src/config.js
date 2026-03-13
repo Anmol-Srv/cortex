@@ -38,7 +38,7 @@ const config = {
   },
 
   server: {
-    port: Number(process.env.PORT) || 3100,
+    port: Number(process.env.PORT) || 4000,
     host: process.env.HOST || '0.0.0.0',
     logLevel: process.env.LOG_LEVEL || 'info',
   },

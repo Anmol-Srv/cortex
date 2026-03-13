@@ -35,6 +35,7 @@ async function ingestDocument({
   metadata = {},
   promptPath,
   categories,
+  entities,
   skipFacts = false,
   skipEntities = false,
   skipMarkdown = false,
@@ -106,7 +107,7 @@ async function ingestDocument({
       title: resolvedTitle,
       sourceType,
       metadata,
-    }, factResult.results, ns);
+    }, factResult.results, ns, entities);
     console.log(`  ${entityResult.entityCount} entities, ${entityResult.relationCount} relations`);
   }
 
