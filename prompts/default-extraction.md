@@ -20,6 +20,7 @@ You are extracting structured facts from a document in an organizational knowled
 - Include **specific details** — numbers, names, identifiers, exact values when available.
 - Do NOT extract generic knowledge (widely known programming concepts, common definitions). Only extract facts specific to THIS document and THIS organization.
 - Set confidence to "high" when the fact comes directly from structured data or explicit statements. Set to "medium" for facts inferred or summarized. Set to "low" for uncertain or speculative information.
+- Set importance to "vital" if the fact is essential to understanding the topic — core rules, key decisions, critical constraints. Set to "supplementary" for supporting details, examples, or background context.
 - Aim for 5-20 facts per document depending on length and density. Don't pad with low-value facts, but don't miss important details either.
 
 ## Anti-Redundancy Rules

@@ -8,16 +8,16 @@ import { getRelationsByFact } from '../../memory/entities/relations.js';
 function registerGetFactContextTool(server) {
   server.tool(
     'get_fact_context',
-    `Get a fact with full context: entities mentioned, relations created, source documents.
-Use for: "tell me more about this fact", "what's the source for this?", "who is involved?".
-Returns fact details + linked entities + provenance.`,
+    `Get full context for a specific fact: complete content, entities mentioned, relations created, sources.
+Use for: drilling down on a fact from search results, checking provenance, understanding connections.
+This is the detail view — search returns truncated facts, this returns everything.`,
     {
+      factId: z.number().optional().describe('Fact ID (from search results)'),
       uid: z.string().optional().describe('Fact UID (e.g. "fact-a1b2c3d4")'),
-      factId: z.number().optional().describe('Fact ID (alternative to UID)'),
     },
     async ({ uid, factId }) => {
       if (!uid && !factId) {
-        return textResponse('Error: Provide either uid or factId.');
+        return textResponse('Error: Provide either factId or uid.');
       }
 
       let fact;
@@ -35,41 +35,32 @@ Returns fact details + linked entities + provenance.`,
         getEntitiesForFact(fact.id),
         getRelationsByFact(fact.id),
         fact.sourceDocumentIds?.length
-          ? cortexDb('document').whereIn('id', fact.sourceDocumentIds).select('id', 'title', 'sourceType', 'sourcePath')
+          ? cortexDb('document').whereIn('id', fact.sourceDocumentIds).select('id', 'title', 'sourceType')
           : [],
       ]);
 
       const parts = [
-        `## Fact: ${fact.uid}`,
-        `- **Content:** ${fact.content}`,
-        `- **Category:** ${fact.category}`,
-        `- **Confidence:** ${fact.confidence}`,
-        `- **Status:** ${fact.status}`,
+        `**Fact ${fact.uid}** (${fact.category}, ${fact.confidence}, ${fact.status})`,
+        fact.content,
       ];
 
       if (fact.sourceSection) {
-        parts.push(`- **Source section:** ${fact.sourceSection}`);
+        parts.push(`Source section: ${fact.sourceSection}`);
       }
 
       if (entities.length) {
-        parts.push('\n### Entities Mentioned');
-        for (const e of entities) {
-          parts.push(`- **${e.name}** (${e.entityType}, id:${e.id})`);
-        }
+        parts.push(`\nEntities mentioned: ${entities.map((e) => `${e.name} (${e.entityType}, id:${e.id})`).join(', ')}`);
       }
 
       if (relations.length) {
-        parts.push('\n### Relations Created from This Fact');
+        parts.push('\nRelations from this fact:');
         for (const r of relations) {
-          parts.push(`- **${r.sourceName}** (${r.sourceType}) —[${r.relationType}]→ **${r.targetName}** (${r.targetType})`);
+          parts.push(`- ${r.sourceName} --[${r.relationType}]--> ${r.targetName}`);
         }
       }
 
       if (documents.length) {
-        parts.push('\n### Source Documents');
-        for (const doc of documents) {
-          parts.push(`- **${doc.title}** (${doc.sourceType}, path: ${doc.sourcePath})`);
-        }
+        parts.push(`\nSources: ${documents.map((d) => `${d.title} (${d.sourceType})`).join(', ')}`);
       }
 
       return textResponse(parts.join('\n'));

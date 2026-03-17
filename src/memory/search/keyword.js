@@ -15,12 +15,21 @@ async function searchChunks(query, { namespaces, limit = 20 }) {
   return rows;
 }
 
-async function searchFacts(query, { namespaces, limit = 20, minConfidence = 'medium' }) {
+async function searchFacts(query, { namespaces, limit = 20, minConfidence = 'medium', pointInTime }) {
   const confidenceRank = { low: 0, medium: 1, high: 2 };
   const minRank = confidenceRank[minConfidence] ?? 1;
 
+  const params = [query, namespaces, query, minRank];
+  let temporalFilter = '';
+  if (pointInTime) {
+    temporalFilter = 'AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)';
+    params.push(pointInTime, pointInTime);
+  }
+
+  params.push(limit);
+
   const { rows } = await cortexDb.raw(`
-    SELECT id, uid, content, category, confidence, namespace, status,
+    SELECT id, uid, content, category, confidence, importance, namespace, status,
            source_document_ids AS "sourceDocumentIds",
            source_section AS "sourceSection",
            ts_rank(search_vector, plainto_tsquery('english', ?)) as rank
@@ -33,9 +42,10 @@ async function searchFacts(query, { namespaces, limit = 20, minConfidence = 'med
             WHEN 'medium' THEN 1
             ELSE 0
           END >= ?
+      ${temporalFilter}
     ORDER BY rank DESC
     LIMIT ?
-  `, [query, namespaces, query, minRank, limit]);
+  `, params);
 
   return rows;
 }

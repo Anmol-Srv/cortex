@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { getStats } from '../../memory/documents/store.js';
 import { getEntityCount } from '../../memory/entities/store.js';
 import { getRelationCount } from '../../memory/entities/relations.js';
-import { getFactCount } from '../../memory/facts/store.js';
+import { getFactCount, getHotFacts } from '../../memory/facts/store.js';
 
 function registerStatusTool(server) {
   server.tool(
@@ -14,28 +14,22 @@ Use when: checking system health, verifying ingestion, reviewing knowledge graph
       namespace: z.string().optional().describe('Filter by namespace. Omit for global stats.'),
     },
     async ({ namespace }) => {
-      const [docStats, factCount, documents, people, topics, relations] = await Promise.all([
+      const [docStats, factCount, documents, people, topics, relations, hotFacts] = await Promise.all([
         getStats(namespace),
         getFactCount(namespace),
         getEntityCount('document'),
         getEntityCount('person'),
         getEntityCount('topic'),
         getRelationCount(),
+        getHotFacts(namespace, { limit: 5 }),
       ]);
 
+      const scope = namespace ? ` (${namespace})` : '';
       const text = [
-        `## Cortex Knowledge Base${namespace ? ` (${namespace})` : ''}`,
-        '',
-        '### Documents',
-        `- Documents: ${docStats.documentCount}`,
-        `- Chunks: ${docStats.totalChunks}`,
-        `- Facts: ${factCount} active`,
-        '',
-        '### Entity Graph',
-        `- Document entities: ${documents}`,
-        `- People: ${people}`,
-        `- Topics: ${topics}`,
-        `- Relations: ${relations}`,
+        `Cortex KB${scope}: ${docStats.documentCount} docs, ${docStats.totalChunks} chunks, ${factCount} facts`,
+        `Entities: ${documents} documents, ${people} people, ${topics} topics`,
+        `Relations: ${relations}`,
+        `Hot facts (top ${hotFacts.length}): ${hotFacts.map((f) => `${f.content.slice(0, 60)}... (${f.accessCount}x)`).join(', ') || 'none yet'}`,
       ].join('\n');
 
       return { content: [{ type: 'text', text }] };

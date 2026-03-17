@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from './parsers/index.js';
 import { chunkSections } from './chunker.js';
 import { embedBatch } from './embedder.js';
+import { contextualizeChunks } from './contextualizer.js';
 import * as documentStore from '../memory/documents/store.js';
 import * as chunkStore from '../memory/chunks/store.js';
 import { extractFacts } from '../memory/facts/extractor.js';
@@ -39,6 +40,7 @@ async function ingestDocument({
   skipFacts = false,
   skipEntities = false,
   skipMarkdown = false,
+  skipContextualization = false,
 }) {
   const ns = namespace || config.defaults.namespace;
   const cats = categories || Object.keys(DEFAULT_CATEGORIES);
@@ -65,12 +67,19 @@ async function ingestDocument({
     return { documentId: doc.id, title: resolvedTitle, skipped: true };
   }
 
-  // Step 3: Chunk + embed
+  // Step 3: Chunk + contextualize + embed
   console.log('[3/6] Chunking and embedding...');
-  const chunks = chunkSections(parsed.sections);
+  let chunks = chunkSections(parsed.sections);
   console.log(`  ${chunks.length} chunks created`);
 
-  const texts = chunks.map((c) => c.content);
+  if (!skipContextualization && chunks.length) {
+    chunks = await contextualizeChunks(chunks, parsed.text, { title: resolvedTitle });
+  }
+
+  const texts = chunks.map((c) => {
+    const prefix = c.contextualPrefix;
+    return prefix ? `${prefix}\n${c.content}` : c.content;
+  });
   const embeddings = await embedBatch(texts);
 
   const chunksWithEmbeddings = chunks.map((chunk, i) => ({
@@ -156,6 +165,7 @@ async function extractAndStoreFacts(text, { documentId, namespace, promptPath, c
       content: raw.content,
       category: raw.category,
       confidence: raw.confidence,
+      importance: raw.importance || 'supplementary',
       namespace,
       sourceDocumentIds: documentId ? [documentId] : [],
       sourceSection: raw.category,

@@ -4,16 +4,17 @@ import { findById, searchByName } from '../../memory/entities/store.js';
 import { listRelationsForEntity } from '../../memory/entities/relations.js';
 import { getFactsForEntity } from '../../memory/facts/entity-linker.js';
 
+const FACT_TRUNCATE = 150;
+
 function registerGetEntityContextTool(server) {
   server.tool(
     'get_entity_context',
-    `Get an entity with full context: all relations, connected facts, graph metrics.
-Use for: "tell me about Alice", "what does this entity do?", "show expertise areas",
-"what documents has this person authored?", "what facts mention this topic?".
-Returns entity + relations + key facts.`,
+    `Get full context for an entity: relations, connected facts, graph position.
+Use for: "tell me about Alice", "what documents cover this topic?", "show expertise areas".
+Returns entity details + relations + key facts (truncated — use get_fact_context for full text).`,
     {
-      entityId: z.number().optional().describe('Entity ID (from search_entity results)'),
-      name: z.string().optional().describe('Entity name (alternative to ID, will find best match)'),
+      entityId: z.number().optional().describe('Entity ID (from search_entity or search results)'),
+      name: z.string().optional().describe('Entity name (alternative to ID)'),
       namespace: z.string().optional().describe('Namespace. Omit for default.'),
     },
     async ({ entityId, name, namespace }) => {
@@ -34,44 +35,44 @@ Returns entity + relations + key facts.`,
       }
 
       const [relations, facts] = await Promise.all([
-        listRelationsForEntity(entity.id, { limit: 50 }),
+        listRelationsForEntity(entity.id, { limit: 30 }),
         getFactsForEntity(entity.id, { limit: 10 }),
       ]);
 
       const parts = [
-        `## ${entity.name}`,
-        `- **Type:** ${entity.entityType}`,
-        `- **ID:** ${entity.id}`,
-        `- **Mentions:** ${entity.mentionCount}`,
+        `**${entity.name}** (${entity.entityType}, id:${entity.id}, ${entity.mentionCount} mentions)`,
       ];
 
       if (entity.description) {
-        parts.push(`- **Description:** ${entity.description}`);
+        parts.push(entity.description);
       }
 
       const outgoing = relations.filter((r) => r.direction === 'outgoing');
       const incoming = relations.filter((r) => r.direction === 'incoming');
 
       if (outgoing.length) {
-        parts.push(`\n### Outgoing Relations (${outgoing.length})`);
+        parts.push(`\nOutgoing relations (${outgoing.length}):`);
         for (const r of outgoing.slice(0, 15)) {
-          parts.push(`- [${r.relationType}] **${r.name}** (${r.entityType})${r.mentionCount > 1 ? ` x${r.mentionCount}` : ''}`);
+          parts.push(`- [${r.relationType}] ${r.name} (${r.entityType}, id:${r.entityId})`);
         }
-        if (outgoing.length > 15) parts.push(`- ... and ${outgoing.length - 15} more`);
+        if (outgoing.length > 15) parts.push(`  ...and ${outgoing.length - 15} more`);
       }
 
       if (incoming.length) {
-        parts.push(`\n### Incoming Relations (${incoming.length})`);
+        parts.push(`\nIncoming relations (${incoming.length}):`);
         for (const r of incoming.slice(0, 15)) {
-          parts.push(`- **${r.name}** (${r.entityType}) [${r.relationType}]${r.mentionCount > 1 ? ` x${r.mentionCount}` : ''}`);
+          parts.push(`- ${r.name} (${r.entityType}, id:${r.entityId}) [${r.relationType}]`);
         }
-        if (incoming.length > 15) parts.push(`- ... and ${incoming.length - 15} more`);
+        if (incoming.length > 15) parts.push(`  ...and ${incoming.length - 15} more`);
       }
 
       if (facts.length) {
-        parts.push(`\n### Key Facts (${facts.length})`);
-        for (const f of facts.slice(0, 10)) {
-          parts.push(`- [${f.category}] ${f.content.length > 120 ? f.content.slice(0, 120) + '...' : f.content}`);
+        parts.push(`\nKey facts (${facts.length}):`);
+        for (const f of facts) {
+          const content = f.content.length > FACT_TRUNCATE
+            ? f.content.slice(0, FACT_TRUNCATE) + '...'
+            : f.content;
+          parts.push(`- [${f.category}] ${content} _(${f.confidence}, id:${f.id})_`);
         }
       }
 
@@ -79,7 +80,7 @@ Returns entity + relations + key facts.`,
         parts.push('\nNo connections or facts found for this entity.');
       }
 
-      parts.push(`\nUse \`traverse_graph(startEntityId=${entity.id})\` for deeper graph exploration.`);
+      parts.push(`\n_Use traverse_graph(startEntityId=${entity.id}) for deeper graph exploration._`);
 
       return textResponse(parts.join('\n'));
     },

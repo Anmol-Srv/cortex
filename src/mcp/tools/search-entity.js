@@ -8,16 +8,16 @@ function registerSearchEntityTool(server) {
     `Find entities in the knowledge graph by name or type.
 Use for: "find Alice", "list all topics", "show all people", "find documents about normalization".
 Entity types: document, person, topic (extensible per domain).
-Returns entities with mention counts — use traverse_graph or get_entity_context for deeper details.`,
+Returns compact entity list. Use get_entity_context(entityId) for full details.`,
     {
-      query: z.string().optional().describe('Entity name to search (e.g. "Alice", "Cohort 6", "normalization")'),
+      query: z.string().optional().describe('Entity name to search (e.g. "Alice", "Cohort 6")'),
       entityType: z.string().optional().describe('Filter by type: session, course, person, topic'),
       limit: z.number().optional().default(10).describe('Max results'),
       namespace: z.string().optional().describe('Namespace. Omit for default.'),
     },
     async ({ query, entityType, limit, namespace }) => {
       if (!query && !entityType) {
-        return errorResponse('Provide either a query (entity name) or entityType.');
+        return textResponse('Error: Provide either a query (entity name) or entityType.');
       }
 
       const results = query
@@ -29,24 +29,20 @@ Returns entities with mention counts — use traverse_graph or get_entity_contex
         return textResponse(`No entities found ${filter}.`);
       }
 
-      const lines = results.map((e) =>
-        `- **${e.name}** (${e.entityType}, id:${e.id}) — ${e.mentionCount} mentions${e.description ? ` — ${e.description}` : ''}`,
-      );
+      const lines = results.map((e) => {
+        const desc = e.description ? ` — ${e.description}` : '';
+        return `- **${e.name}** (${e.entityType}, id:${e.id}, ${e.mentionCount} mentions)${desc}`;
+      });
 
       const header = query ? `Entities matching "${query}"` : `${entityType} entities`;
-      const footer = '\nUse `get_entity_context(entityId=<id>)` for details or `traverse_graph(startEntityId=<id>)` to explore connections.';
 
-      return textResponse(`## ${header} (${results.length})\n\n${lines.join('\n')}${footer}`);
+      return textResponse(`${header} (${results.length}):\n${lines.join('\n')}\n\n_Use get_entity_context(entityId=<id>) for details or traverse_graph(startEntityId=<id>) for connections._`);
     },
   );
 }
 
 function textResponse(text) {
   return { content: [{ type: 'text', text }] };
-}
-
-function errorResponse(message) {
-  return { content: [{ type: 'text', text: `Error: ${message}` }] };
 }
 
 export { registerSearchEntityTool };

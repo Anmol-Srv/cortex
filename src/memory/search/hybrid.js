@@ -1,6 +1,10 @@
 import { keyBy } from 'lodash-es';
 
 import { embed } from '../../ingestion/embedder.js';
+import { findByName, searchByName } from '../entities/store.js';
+import { getFactsForEntity } from '../facts/entity-linker.js';
+import { recordAccess } from '../facts/store.js';
+import { listRelationsForEntity } from '../entities/relations.js';
 import * as vectorSearch from './vector.js';
 import * as keywordSearch from './keyword.js';
 import { extractEntitiesFromFacts, findRelatedFacts, rerank } from './graph-enhancement.js';
@@ -13,33 +17,135 @@ const RRF_K = 20;
 const VECTOR_WEIGHT = 1.0;
 const KEYWORD_WEIGHT = 0.7;
 
-async function search(query, { namespaces, limit = 20, minConfidence = 'medium', useGraph = true }) {
-  const queryEmbedding = await embed(query);
+// Entity detection only for short, name-like queries — not full sentences
+const MAX_ENTITY_QUERY_LENGTH = 60;
 
-  const [vectorChunks, vectorFacts, kwChunks, kwFacts] = await Promise.all([
-    vectorSearch.searchChunks(queryEmbedding, { namespaces, limit }),
-    vectorSearch.searchFacts(queryEmbedding, { namespaces, limit, minConfidence }),
-    keywordSearch.searchChunks(query, { namespaces, limit }),
-    keywordSearch.searchFacts(query, { namespaces, limit, minConfidence }),
+async function search(query, { namespaces, limit = 5, minConfidence = 'medium', useGraph = false, includeChunks = false, pointInTime } = {}) {
+  const matchedEntity = await detectEntity(query, namespaces);
+
+  let result;
+  if (matchedEntity) {
+    result = await entityFirstSearch(matchedEntity, query, { namespaces, limit, minConfidence, includeChunks, pointInTime });
+  } else {
+    result = await standardSearch(query, { namespaces, limit, minConfidence, useGraph, includeChunks, pointInTime });
+  }
+
+  // Fire-and-forget access tracking
+  const factIds = result.facts.map((f) => f.id).filter(Boolean);
+  recordAccess(factIds).catch((err) => console.error('[access-tracking]', err.message));
+
+  return result;
+}
+
+// Check if the query matches a known entity by name (DB lookup, no LLM call)
+async function detectEntity(query, namespaces) {
+  if (query.length < 2 || query.length > MAX_ENTITY_QUERY_LENGTH) return null;
+
+  const ns = namespaces[0] || 'default';
+
+  // Exact case-insensitive match first
+  const exact = await findByName(query, ns);
+  if (exact) return exact;
+
+  // Fuzzy LIKE match — top result only
+  const results = await searchByName(query, { namespace: ns, limit: 1 });
+  return results[0] || null;
+}
+
+// Entity detected: fetch entity facts + relations in parallel with hybrid search, then merge
+async function entityFirstSearch(entity, query, { namespaces, limit, minConfidence, includeChunks, pointInTime }) {
+  const [entityFacts, entityRelations, hybridResult] = await Promise.all([
+    getFactsForEntity(entity.id, { limit }),
+    listRelationsForEntity(entity.id, { limit: 15 }),
+    coreHybridSearch(query, { namespaces, limit, minConfidence, includeChunks, pointInTime }),
   ]);
 
-  const chunks = rrfMerge(vectorChunks, kwChunks, limit);
-  let facts = rrfMerge(vectorFacts, kwFacts, limit);
+  // Entity-linked facts get highest priority
+  const entityFactsMarked = entityFacts.map((f) => ({ ...f, source: 'entity' }));
+
+  // Hybrid facts fill remaining slots, deduped against entity facts
+  const seenIds = new Set(entityFactsMarked.map((f) => f.id));
+  const hybridExtra = hybridResult.facts
+    .filter((f) => !seenIds.has(f.id))
+    .map((f) => ({ ...f, source: 'search' }));
+
+  const facts = [...entityFactsMarked, ...hybridExtra].slice(0, limit);
+
+  const relatedEntities = entityRelations.map((r) => ({
+    id: r.entityId,
+    name: r.name,
+    type: r.entityType,
+    relation: r.relationType,
+    direction: r.direction,
+    mentions: r.mentionCount,
+  }));
+
+  return {
+    facts,
+    chunks: includeChunks ? hybridResult.chunks : [],
+    matchedEntity: {
+      id: entity.id,
+      name: entity.name,
+      type: entity.entityType,
+      mentions: entity.mentionCount,
+      description: entity.description || null,
+    },
+    relatedEntities,
+  };
+}
+
+// No entity match: regular hybrid search with optional graph enhancement
+async function standardSearch(query, { namespaces, limit, minConfidence, useGraph, includeChunks, pointInTime }) {
+  const result = await coreHybridSearch(query, { namespaces, limit, minConfidence, includeChunks, pointInTime });
+  let facts = result.facts.map((f) => ({ ...f, source: 'search' }));
 
   if (useGraph && facts.length) {
     try {
       const mentionedEntities = await extractEntitiesFromFacts(facts.slice(0, 5));
-
       if (mentionedEntities.length) {
         const relatedFacts = await findRelatedFacts(
           mentionedEntities.map((e) => e.id),
-          { limit: 10 },
+          { limit: 5 },
         );
         facts = rerank(facts, relatedFacts, mentionedEntities.map((e) => e.id), limit);
       }
     } catch (err) {
-      console.error('[graph-enhancement] Failed, falling back to base results:', err.message);
+      console.error('[graph-enhancement] Failed:', err.message);
     }
+  }
+
+  return {
+    facts,
+    chunks: includeChunks ? result.chunks : [],
+    matchedEntity: null,
+    relatedEntities: [],
+  };
+}
+
+// Core vector+keyword hybrid with RRF merge — skips chunk queries when not needed
+async function coreHybridSearch(query, { namespaces, limit, minConfidence, includeChunks = false, pointInTime }) {
+  const queryEmbedding = await embed(query);
+
+  const queries = [
+    vectorSearch.searchFacts(queryEmbedding, { namespaces, limit, minConfidence, pointInTime }),
+    keywordSearch.searchFacts(query, { namespaces, limit, minConfidence, pointInTime }),
+  ];
+
+  if (includeChunks) {
+    queries.push(
+      vectorSearch.searchChunks(queryEmbedding, { namespaces, limit }),
+      keywordSearch.searchChunks(query, { namespaces, limit }),
+    );
+  }
+
+  const results = await Promise.all(queries);
+  const [vectorFacts, kwFacts] = results;
+
+  const facts = rrfMerge(vectorFacts, kwFacts, limit);
+  let chunks = [];
+
+  if (includeChunks && results.length === 4) {
+    chunks = rrfMerge(results[2], results[3], limit);
   }
 
   return { facts, chunks };
@@ -60,15 +166,20 @@ function rrfMerge(vectorResults, keywordResults, limit) {
     scores[item.id] = (scores[item.id] || 0) + KEYWORD_WEIGHT / (RRF_K + rank + 1);
   });
 
-  // Normalize scores to 0-1 range
-  const entries = Object.entries(scores).sort(([, a], [, b]) => b - a);
+  // Normalize scores to 0-1 range, with vital facts sorted before supplementary at same score
+  const entries = Object.entries(scores).sort(([idA, a], [idB, b]) => {
+    if (a !== b) return b - a;
+    const importanceA = itemsById[idA]?.importance === 'vital' ? 1 : 0;
+    const importanceB = itemsById[idB]?.importance === 'vital' ? 1 : 0;
+    return importanceB - importanceA;
+  });
   const maxScore = entries.length ? entries[0][1] : 1;
 
   return entries
     .slice(0, limit)
     .map(([id, score]) => ({
       ...itemsById[id],
-      rrfScore: Math.round((score / maxScore) * 1000) / 1000,
+      rrfScore: Math.round((score / maxScore) * 100) / 100,
     }));
 }
 

@@ -10,6 +10,7 @@ async function insertChunks(documentId, chunks, namespace) {
     documentId,
     chunkIndex: i,
     content: chunk.content,
+    contextualPrefix: chunk.contextualPrefix || null,
     sectionHeading: chunk.sectionHeading || null,
     namespace,
     embedding: chunk.embedding ? pgVector(chunk.embedding) : null,
@@ -19,10 +20,10 @@ async function insertChunks(documentId, chunks, namespace) {
     .insert(rows)
     .returning('*');
 
-  // Update tsvector search_vector
+  // Update tsvector search_vector (include contextual prefix for better keyword search)
   await cortexDb.raw(`
     UPDATE chunk
-    SET search_vector = to_tsvector('english', content)
+    SET search_vector = to_tsvector('english', COALESCE(contextual_prefix, '') || ' ' || content)
     WHERE document_id = ?
   `, [documentId]);
 

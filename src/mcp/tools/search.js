@@ -1,65 +1,90 @@
 import { z } from 'zod';
-import { partition } from 'lodash-es';
+import { groupBy, sortBy } from 'lodash-es';
 
 import { search } from '../../memory/search/hybrid.js';
 import config from '../../config.js';
 
-const CONFIDENCE_INDICATOR = { high: '[high]', medium: '[med]', low: '[low]' };
+const FACT_TRUNCATE = 200;
 
 function registerSearchTool(server) {
   server.tool(
     'search',
-    `Search Cortex knowledge base — finds facts and chunks across all ingested documents.
-Use for: "how does X work", "what are the rules for Y", "what is the convention for Z",
-architecture decisions, business rules, workflows, domain knowledge.
-Returns ranked facts (precise answers) and chunks (supporting context).
-Graph-enhanced: also returns related facts discovered through entity relationships.
-Facts are grouped by confidence level (high > medium > low).`,
+    `Search Cortex knowledge base for facts across all ingested documents.
+Automatically detects entity names and returns entity-centric results.
+Use for: "how does X work", "what is Y?", "what are the rules for Z", domain knowledge, decisions.
+Returns compact facts. Use get_fact_context(factId) for full detail on any fact.
+Set includeChunks=true only when raw document context is needed.
+Set format="compact" for token-efficient output (one line per category, no IDs/metadata).`,
     {
       query: z.string().describe('Natural language search query'),
-      limit: z.number().optional().default(10).describe('Max results per type (facts + chunks)'),
-      namespaces: z.array(z.string()).optional().describe('Filter by namespaces. Defaults to all accessible.'),
-      minConfidence: z.enum(['low', 'medium', 'high']).optional().default('medium').describe('Minimum fact confidence level'),
-      useGraph: z.boolean().optional().default(true).describe('Enable graph-enhanced search (entity traversal for related facts)'),
+      limit: z.number().optional().default(5).describe('Max facts to return (default 5)'),
+      namespaces: z.array(z.string()).optional().describe('Filter by namespaces'),
+      minConfidence: z.enum(['low', 'medium', 'high']).optional().default('medium').describe('Minimum fact confidence'),
+      includeChunks: z.boolean().optional().default(false).describe('Include raw document chunks (verbose — only when needed)'),
+      useGraph: z.boolean().optional().default(false).describe('Traverse entity graph for additional related facts'),
+      pointInTime: z.string().optional().describe('ISO timestamp — return only facts valid at this point in time'),
+      format: z.enum(['full', 'compact']).optional().default('full').describe('Output format: "full" (default) or "compact" (token-efficient, one line per category)'),
     },
-    async ({ query, limit, namespaces, minConfidence, useGraph }) => {
+    async ({ query, limit, namespaces, minConfidence, includeChunks, useGraph, pointInTime, format }) => {
       const ns = namespaces?.length ? namespaces : [config.defaults.namespace];
+      const pit = pointInTime ? new Date(pointInTime) : undefined;
 
-      const { facts, chunks } = await search(query, {
+      const { facts, chunks, matchedEntity, relatedEntities } = await search(query, {
         namespaces: ns,
         limit,
         minConfidence,
+        includeChunks,
         useGraph,
+        pointInTime: pit,
       });
+
+      if (format === 'compact') {
+        const text = formatCompact(facts, matchedEntity);
+        return { content: [{ type: 'text', text }] };
+      }
 
       const parts = [];
 
+      if (matchedEntity) {
+        parts.push(`**Matched entity:** ${matchedEntity.name} (${matchedEntity.type}, id:${matchedEntity.id}, ${matchedEntity.mentions} mentions)`);
+        if (matchedEntity.description) {
+          parts.push(matchedEntity.description);
+        }
+        parts.push('');
+      }
+
       if (facts.length) {
-        const [related, direct] = partition(facts, (f) => f.resultType === 'related');
-
-        if (direct.length) {
-          parts.push(...formatFactsByConfidence(direct, limit));
-        }
-
-        if (related.length) {
-          parts.push('\n## Related (via entity graph)\n');
-          for (const f of related) {
-            const ci = CONFIDENCE_INDICATOR[f.confidence] || '';
-            parts.push(`- ${ci} **[${f.category}]** ${f.content}\n  _(via ${f.relationPath}, score: ${f.rrfScore?.toFixed(4)})_\n`);
-          }
+        parts.push(`**Facts (${facts.length}):**`);
+        for (const f of facts) {
+          const content = truncate(f.content, FACT_TRUNCATE);
+          const vital = f.importance === 'vital' ? ' **[VITAL]**' : '';
+          parts.push(`- [${f.category}] ${content}${vital} _(${f.confidence}, id:${f.id})_`);
         }
       }
 
-      if (chunks.length) {
-        parts.push('\n## Chunks\n');
-        for (const c of chunks) {
+      if (relatedEntities.length) {
+        parts.push('');
+        parts.push(`**Related entities (${relatedEntities.length}):**`);
+        for (const e of relatedEntities.slice(0, 10)) {
+          parts.push(`- ${e.name} (${e.type}) [${e.relation}] id:${e.id}`);
+        }
+      }
+
+      if (includeChunks && chunks.length) {
+        parts.push('');
+        parts.push(`**Chunks (${chunks.length}):**`);
+        for (const c of chunks.slice(0, 3)) {
           const heading = c.sectionHeading ? `[${c.sectionHeading}] ` : '';
-          parts.push(`---\n${heading}_(score: ${c.rrfScore?.toFixed(4)})_\n\n${c.content}\n`);
+          parts.push(`---\n${heading}${truncate(c.content, 500)}`);
         }
       }
 
-      if (!parts.length) {
-        parts.push('No results found.');
+      if (!facts.length && !chunks.length) {
+        parts.push('No results found. Try broader terms or use search_entity to find entity names.');
+      }
+
+      if (matchedEntity) {
+        parts.push(`\n_Drill down: get_entity_context(entityId=${matchedEntity.id}) for full details about ${matchedEntity.name}_`);
       }
 
       return { content: [{ type: 'text', text: parts.join('\n') }] };
@@ -67,35 +92,32 @@ Facts are grouped by confidence level (high > medium > low).`,
   );
 }
 
-function formatFactsByConfidence(facts, limit) {
-  const high = facts.filter((f) => f.confidence === 'high');
-  const medium = facts.filter((f) => f.confidence === 'medium');
-  const low = facts.filter((f) => f.confidence === 'low');
-
+function formatCompact(facts, matchedEntity) {
   const parts = [];
 
-  if (high.length) {
-    parts.push('## High Confidence Facts\n');
-    for (const f of high.slice(0, Math.ceil(limit * 0.6))) {
-      parts.push(`- **[${f.category}]** ${f.content}\n  _(score: ${f.rrfScore?.toFixed(4)})_\n`);
-    }
+  if (matchedEntity) {
+    parts.push(`> ${matchedEntity.name} (${matchedEntity.type})`);
   }
 
-  if (medium.length) {
-    parts.push('\n## Medium Confidence Facts\n');
-    for (const f of medium.slice(0, Math.ceil(limit * 0.3))) {
-      parts.push(`- **[${f.category}]** ${f.content}\n  _(score: ${f.rrfScore?.toFixed(4)})_\n`);
-    }
+  if (!facts.length) {
+    parts.push('No results.');
+    return parts.join('\n');
   }
 
-  if (low.length && !high.length) {
-    parts.push('\n## Low Confidence Facts (no better results available)\n');
-    for (const f of low.slice(0, 2)) {
-      parts.push(`- **[${f.category}]** ${f.content}\n  _(score: ${f.rrfScore?.toFixed(4)})_\n`);
-    }
+  const grouped = groupBy(facts, 'category');
+
+  for (const [category, categoryFacts] of Object.entries(grouped)) {
+    const sorted = sortBy(categoryFacts, (f) => (f.importance === 'vital' ? 0 : 1));
+    const contents = sorted.map((f) => f.content);
+    parts.push(`[${category}]: ${contents.join('. ')}`);
   }
 
-  return parts;
+  return parts.join('\n');
+}
+
+function truncate(text, max) {
+  if (!text || text.length <= max) return text;
+  return text.slice(0, max) + '...';
 }
 
 export { registerSearchTool };

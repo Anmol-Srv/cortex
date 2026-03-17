@@ -42,11 +42,13 @@ Most RAG systems only store raw chunks. Cortex stores three layers because diffe
 
 | Layer | What's Stored | Good For |
 |-------|--------------|----------|
-| **Chunks** | 512-token text blocks with vector embeddings | "Show me the full refund policy section" |
-| **Facts** | LLM-extracted atomic statements, categorized and deduplicated | "What are ALL conditions that trigger a deploy rollback?" |
+| **Chunks** | 512-token text blocks with contextual prefixes and vector embeddings | "Show me the full refund policy section" |
+| **Facts** | LLM-extracted atomic statements — categorized, deduplicated, importance-scored, temporally tracked | "What are ALL conditions that trigger a deploy rollback?" |
 | **Entity Graph** | Named nodes (documents, people, topics) with typed relations | "What topics has this author written about?" |
 
 The same source document produces all three layers. Chunks give breadth. Facts give precision. The graph gives relationships.
+
+Each fact also carries an **importance** score (`vital` or `supplementary`) and **temporal validity** (`valid_from`/`valid_until`), so Cortex knows which facts are essential and which are still current.
 
 </details>
 
@@ -61,7 +63,11 @@ Vector search alone misses exact identifiers. Keyword search alone misses semant
 | `user_sessions` table | Misses it — not semantically rich | Finds exact match | Keyword saves it |
 | "why deploys fail" | Finds related error patterns | Misses — "fail" isn't in "cannot deploy" | Vector saves it |
 
-After merging via **Reciprocal Rank Fusion (RRF)**, the top facts are enriched by traversing the entity graph — discovering related facts that vector search would never surface.
+After merging via **Reciprocal Rank Fusion (RRF)**, vital facts are promoted over supplementary ones at equal scores. The top facts are then enriched by traversing the entity graph — discovering related facts that vector search would never surface.
+
+Search supports **point-in-time queries** (`pointInTime` param) to return only facts that were valid at a specific timestamp — useful when you need to know what was true on a particular date, not just what's true now.
+
+Results can also be returned in a **compact format** (`format="compact"`) that groups facts by category with one line per category and no IDs or metadata — optimized for token-efficient LLM consumption.
 
 </details>
 
@@ -77,7 +83,7 @@ Facts are never blindly overwritten. Every new fact is compared against what's a
 | Contradicts existing | **Contradict** — mark old fact, add new one, flag for human review |
 | < 0.80 | **Add** — genuinely new knowledge |
 
-Contradictions are kept, not deleted. When two documents disagree, Cortex surfaces the conflict instead of silently picking one.
+Contradictions are kept, not deleted. When two documents disagree, Cortex surfaces the conflict instead of silently picking one. Contradicted and superseded facts automatically receive a `valid_until` timestamp, creating a temporal trail of how knowledge evolved.
 
 </details>
 
@@ -108,6 +114,26 @@ docs/internal   — internal runbooks, processes
 ```
 
 A public-facing bot sees only `docs/public`. A developer's Claude Code sees everything. Same data, same query path, different views.
+
+</details>
+
+<details>
+<summary><strong>Contextual Chunk Enrichment</strong></summary>
+
+Raw chunks lose context when read in isolation. Cortex enriches each chunk with a **contextual prefix** — a 1-2 sentence summary that situates the chunk within the full document.
+
+During ingestion, all chunks are sent in a single LLM call along with the document text. The returned prefixes are stored alongside the chunk, prepended to content for embedding (so vector search understands context), and included in the tsvector index (so keyword search benefits too).
+
+This is similar to Anthropic's [Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval) technique. Skip it with `--skip-contextualization` when cost matters more than retrieval quality.
+
+</details>
+
+<details>
+<summary><strong>Fact Access Tracking</strong></summary>
+
+Every search automatically tracks which facts were accessed. Cortex records `access_count` and `last_accessed_at` per fact, building a heat map of your organization's most-queried knowledge.
+
+Use the `status` MCP tool or `GET /api/facts/hot` to see the most frequently accessed facts — useful for identifying core institutional knowledge, prioritizing fact accuracy, or understanding what questions your team asks most.
 
 </details>
 
@@ -197,19 +223,19 @@ Data Sources (files, URLs, raw text)
         │
         ▼
  Ingestion Pipeline (6 steps)
- parse → hash → chunk+embed → extract facts → link entities → generate MD
+ parse → hash → chunk+contextualize+embed → extract facts → link entities → generate MD
         │
         ▼
  Three-Layer Knowledge Store (PostgreSQL + pgvector)
- ├── chunk       — 512-token blocks, vector(768) + tsvector
- ├── fact        — atomic statements, AUDM-deduplicated, confidence-scored
+ ├── chunk       — 512-token blocks, contextual prefixes, vector(768) + tsvector
+ ├── fact        — atomic statements, importance-scored, temporally tracked, AUDM-deduplicated
  └── entity/relation — typed graph, 4-stage dedup, temporal tracking
         │
         ├── MCP Server (stdio)  ──► Claude Code
         └── REST API (HTTP)     ──► External consumers
 ```
 
-Cortex uses a single PostgreSQL database with pgvector for all knowledge storage. LLM calls (fact extraction, AUDM decisions, entity verification) happen at ingestion time via the Claude CLI. Search is pure database queries — no LLM latency at query time.
+Cortex uses a single PostgreSQL database with pgvector for all knowledge storage. LLM calls (fact extraction, chunk contextualization, AUDM decisions, entity verification) happen at ingestion time via the Claude CLI. Search is pure database queries — no LLM latency at query time. Every search automatically tracks fact access counts for hot-knowledge analytics.
 
 <details>
 <summary><strong>Ingestion Pipeline (6 steps)</strong></summary>
@@ -217,8 +243,8 @@ Cortex uses a single PostgreSQL database with pgvector for all knowledge storage
 ```
 [1/6] Parse content       — auto-detect format, extract structured sections
 [2/6] Check for changes   — SHA-256 content hash, skip unchanged documents
-[3/6] Chunk + embed       — section-aware splitting, batch embed via Ollama
-[4/6] Extract facts       — LLM-based atomic fact extraction with configurable prompts
+[3/6] Chunk + context     — section-aware splitting, contextual prefix enrichment, batch embed
+[4/6] Extract facts       — LLM-based atomic fact extraction with importance scoring
 [5/6] Link entities       — 4-stage dedup cascade + typed relations
 [6/6] Generate markdown   — structured knowledge file to local filesystem or S3
 ```
@@ -232,6 +258,7 @@ Cortex uses a single PostgreSQL database with pgvector for all knowledge storage
 src/
 ├── ingestion/
 │   ├── pipeline.js              # Generic document ingestion orchestrator
+│   ├── contextualizer.js        # Contextual chunk prefix enrichment (single LLM call)
 │   ├── parsers/                 # Format-specific: markdown, text, HTML, code, JSON
 │   ├── sources/                 # Content connectors: file, URL, raw
 │   ├── chunker.js               # Format-aware text splitting
@@ -259,7 +286,7 @@ src/
 │
 ├── db/
 │   ├── cortex.js                # Knex connection, camelCase mappers
-│   └── migrations/              # 10 .cjs migration files
+│   └── migrations/              # 15 .cjs migration files
 │
 ├── lib/                         # LLM wrapper, error classes
 ├── scripts/                     # ingest.js, test-search.js
@@ -299,7 +326,7 @@ src/
 
 | Tool | What it does |
 |------|-------------|
-| `search` | Hybrid semantic + keyword search over facts and chunks. Supports `minConfidence` and `useGraph` for entity-enriched results. |
+| `search` | Hybrid semantic + keyword search over facts and chunks. Supports `minConfidence`, `useGraph`, `pointInTime` (temporal filter), and `format` (`full` or `compact`). Vital facts are promoted in results. |
 | `search_entity` | Find entities by name or list all entities of a given type (document, person, topic). |
 
 ### Traversal
@@ -319,7 +346,7 @@ src/
 
 | Tool | What it does |
 |------|-------------|
-| `status` | Knowledge base stats — document, chunk, fact, and entity counts. |
+| `status` | Knowledge base stats — document, chunk, fact, entity counts, and most-accessed (hot) facts. |
 | `ingest` | Ingest a document into the knowledge base. Accepts raw content, a file path, or a URL. |
 
 Tools are designed to chain: `search` → `get_entity_context` → `traverse_graph` → deeper facts.
@@ -340,6 +367,7 @@ Auth: Bearer token via `Authorization` header. If no API keys exist in the datab
 | `GET` | `/api/entities/:id/neighbors` | Entity neighbors (`depth`, `limit`) |
 | `GET` | `/api/entities/:id/related` | Related entities (`maxDepth`, `relationType`, `limit`) |
 | `GET` | `/api/graph/path` | Shortest path between entities (`from`, `to`, `maxDepth`) |
+| `GET` | `/api/facts/hot` | Most frequently accessed facts (`namespace`, `limit`, `since`) |
 | `GET` | `/api/facts/:uid` | Fact detail with entities, relations, source documents |
 | `GET` | `/api/documents` | List documents (`namespace`, `sourceType`, `limit`) |
 | `GET` | `/api/documents/:uid` | Document detail |
@@ -357,6 +385,7 @@ cortex ingest <file|url|glob> [options]    # Ingest documents
   --skip-facts                              # Skip fact extraction
   --skip-entities                           # Skip entity linking
   --skip-markdown                           # Skip markdown generation
+  --skip-contextualization                  # Skip contextual chunk enrichment
 
 cortex search "query" [options]            # Search the knowledge base
   --namespace=<ns>                          # Filter by namespace

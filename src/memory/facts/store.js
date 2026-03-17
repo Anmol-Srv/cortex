@@ -19,12 +19,12 @@ const AMBIGUOUS_THRESHOLD = 0.65;
  * AUDM pipeline: Add, Update, Delete (contradict), or Merge.
  * For each fact, checks similarity against existing facts and decides what to do.
  */
-async function saveFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection }) {
+async function saveFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection }) {
   const embedding = await embed(content);
   const similar = await findSimilar(embedding, { namespace });
 
   if (!similar.length) {
-    const fact = await insertFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection, embedding });
+    const fact = await insertFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection, embedding });
     return { action: 'ADD', fact };
   }
 
@@ -39,20 +39,20 @@ async function saveFact({ content, category, confidence, namespace, sourceDocume
 
     if (decision === 'UPDATE') {
       const oldContent = topMatch.content;
-      await updateFact(topMatch.id, { content, category, confidence, sourceDocumentIds, embedding });
+      await updateFact(topMatch.id, { content, category, confidence, importance, sourceDocumentIds, embedding });
       await recordHistory({ targetType: 'fact', targetId: topMatch.id, event: 'UPDATE', oldContent, newContent: content, triggeredBy: `audm:sim=${topMatch.similarity.toFixed(3)}` });
       return { action: 'UPDATE', existingId: topMatch.id };
     }
 
     if (decision === 'CONTRADICT') {
-      const fact = await insertFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection, embedding });
+      const fact = await insertFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection, embedding });
       await markContradicted(topMatch.id, fact.id);
       await recordHistory({ targetType: 'fact', targetId: topMatch.id, event: 'CONTRADICT', oldContent: topMatch.content, newContent: content, triggeredBy: `audm:sim=${topMatch.similarity.toFixed(3)}` });
       return { action: 'CONTRADICT', fact, contradictedId: topMatch.id };
     }
   }
 
-  const fact = await insertFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection, embedding });
+  const fact = await insertFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection, embedding });
   return { action: 'ADD', fact };
 }
 
@@ -70,7 +70,7 @@ async function audmDecide(newContent, existingContent) {
 
 // ── Core CRUD ───────────────────────────────────────────────────────────────
 
-async function insertFact({ content, category, confidence, namespace, sourceDocumentIds, sourceSection, embedding }) {
+async function insertFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection, embedding }) {
   const uid = `fact-${randomUUID().slice(0, 8)}`;
 
   const [fact] = await cortexDb('fact')
@@ -79,11 +79,13 @@ async function insertFact({ content, category, confidence, namespace, sourceDocu
       content,
       category,
       confidence: confidence || 'medium',
+      importance: importance || 'supplementary',
       namespace,
       status: 'active',
       sourceDocumentIds: sourceDocumentIds || [],
       sourceSection: sourceSection || null,
       embedding: embedding ? `[${embedding.join(',')}]` : null,
+      validFrom: new Date(),
     })
     .returning('*');
 
@@ -96,13 +98,14 @@ async function insertFact({ content, category, confidence, namespace, sourceDocu
   return fact;
 }
 
-async function updateFact(factId, { content, category, confidence, sourceDocumentIds, embedding }) {
+async function updateFact(factId, { content, category, confidence, importance, sourceDocumentIds, embedding }) {
   await cortexDb('fact')
     .where({ id: factId })
     .update({
       content,
       category,
       confidence,
+      importance,
       sourceDocumentIds,
       embedding: embedding ? `[${embedding.join(',')}]` : undefined,
     });
@@ -139,13 +142,13 @@ async function listByDocument(documentId) {
 async function markContradicted(factId, contradictedById) {
   await cortexDb('fact')
     .where({ id: factId })
-    .update({ status: 'contradicted', contradictedById });
+    .update({ status: 'contradicted', contradictedById, validUntil: cortexDb.fn.now() });
 }
 
 async function markSuperseded(factId, supersededById) {
   await cortexDb('fact')
     .where({ id: factId })
-    .update({ status: 'superseded', supersededById });
+    .update({ status: 'superseded', supersededById, validUntil: cortexDb.fn.now() });
 }
 
 async function findSimilar(embedding, { namespace, threshold = AMBIGUOUS_THRESHOLD, limit = 5 }) {
@@ -177,6 +180,29 @@ async function recordHistory({ targetType, targetId, event, oldContent, newConte
   });
 }
 
+async function recordAccess(factIds) {
+  if (!factIds.length) return;
+  await cortexDb('fact')
+    .whereIn('id', factIds)
+    .update({
+      accessCount: cortexDb.raw('access_count + 1'),
+      lastAccessedAt: cortexDb.fn.now(),
+    });
+}
+
+async function getHotFacts(namespace, { limit = 10, since } = {}) {
+  const query = cortexDb('fact')
+    .where({ status: 'active' })
+    .where('accessCount', '>', 0)
+    .orderBy('accessCount', 'desc')
+    .limit(limit);
+
+  if (namespace) query.where({ namespace });
+  if (since) query.where('lastAccessedAt', '>=', since);
+
+  return query;
+}
+
 async function getFactCount(namespace) {
   const query = cortexDb('fact').where({ status: 'active' });
   if (namespace) query.where({ namespace });
@@ -193,5 +219,7 @@ export {
   markContradicted,
   markSuperseded,
   findSimilar,
+  recordAccess,
+  getHotFacts,
   getFactCount,
 };

@@ -17,13 +17,22 @@ async function searchChunks(embedding, { namespaces, limit = 20 }) {
   return rows;
 }
 
-async function searchFacts(embedding, { namespaces, limit = 20, minConfidence = 'medium' }) {
+async function searchFacts(embedding, { namespaces, limit = 20, minConfidence = 'medium', pointInTime }) {
   const vec = `[${embedding.join(',')}]`;
   const confidenceRank = { low: 0, medium: 1, high: 2 };
   const minRank = confidenceRank[minConfidence] ?? 1;
 
+  const params = [vec, namespaces, minRank];
+  let temporalFilter = '';
+  if (pointInTime) {
+    temporalFilter = 'AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)';
+    params.push(pointInTime, pointInTime);
+  }
+
+  params.push(vec, limit);
+
   const { rows } = await cortexDb.raw(`
-    SELECT id, uid, content, category, confidence, namespace, status,
+    SELECT id, uid, content, category, confidence, importance, namespace, status,
            source_document_ids AS "sourceDocumentIds",
            source_section AS "sourceSection",
            1 - (embedding <=> ?) as similarity
@@ -36,9 +45,10 @@ async function searchFacts(embedding, { namespaces, limit = 20, minConfidence = 
             WHEN 'medium' THEN 1
             ELSE 0
           END >= ?
+      ${temporalFilter}
     ORDER BY embedding <=> ?
     LIMIT ?
-  `, [vec, namespaces, minRank, vec, limit]);
+  `, params);
 
   return rows;
 }

@@ -22,6 +22,7 @@ Respond with ONLY a JSON array of facts. Each fact object must have exactly thes
 - "content" (string): the atomic fact statement
 - "category" (string): one of ${categories.join(', ')}
 - "confidence" (string): one of high, medium, low
+- "importance" (string): "vital" if essential to understanding the topic, "supplementary" if supporting detail
 
 Output the JSON array directly, no explanation or wrapping.`;
 
@@ -30,9 +31,12 @@ Output the JSON array directly, no explanation or wrapping.`;
 
   if (!Array.isArray(parsed)) return [];
 
-  return parsed.filter((f) =>
-    f.content && categories.includes(f.category) && ['high', 'medium', 'low'].includes(f.confidence),
-  );
+  return parsed
+    .filter((f) => f.content && categories.includes(f.category) && ['high', 'medium', 'low'].includes(f.confidence))
+    .map((f) => ({
+      ...f,
+      importance: ['vital', 'supplementary'].includes(f.importance) ? f.importance : 'supplementary',
+    }));
 }
 
 export { extractFacts };
