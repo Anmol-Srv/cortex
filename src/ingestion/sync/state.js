@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { nanoid } from 'nanoid';
 
 import cortexDb from '../../db/cortex.js';
 
 async function createSyncRun({ connectionId, pipelineType, syncType, stateBefore }) {
-  const uid = `sync-${randomUUID().slice(0, 8)}`;
+  const uid = `sync-${nanoid(16)}`;
 
   const [row] = await cortexDb('sync_run')
     .insert({

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { nanoid } from 'nanoid';
 
 import cortexDb from '../../db/cortex.js';
 
@@ -13,25 +13,23 @@ async function findByUid(uid) {
 }
 
 async function upsert({ sourcePath, sourceType, title, contentHash, namespace }) {
-  const existing = await findBySourcePath(sourcePath);
+  const uid = `doc-${nanoid(16)}`;
 
-  if (existing) {
-    if (existing.contentHash === contentHash) return { doc: existing, changed: false };
+  const { rows: [doc] } = await cortexDb.raw(`
+    INSERT INTO document (uid, source_path, source_type, title, content_hash, namespace, last_ingested_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW())
+    ON CONFLICT (source_path) DO UPDATE SET
+      title = EXCLUDED.title,
+      content_hash = EXCLUDED.content_hash,
+      last_ingested_at = NOW(),
+      updated_at = NOW()
+    RETURNING *, (xmax = 0) AS "isNew", content_hash != ? AS "contentChanged"
+  `, [uid, sourcePath, sourceType, title, contentHash, namespace, contentHash]);
 
-    await cortexDb('document')
-      .where({ id: existing.id })
-      .update({ contentHash, title, lastIngestedAt: cortexDb.fn.now() });
+  const isNew = doc.isNew;
+  const changed = isNew || doc.contentChanged;
 
-    const [updated] = await cortexDb('document').where({ id: existing.id });
-    return { doc: updated, changed: true };
-  }
-
-  const uid = `doc-${randomUUID().slice(0, 8)}`;
-  const [doc] = await cortexDb('document')
-    .insert({ uid, sourcePath, sourceType, title, contentHash, namespace, lastIngestedAt: cortexDb.fn.now() })
-    .returning('*');
-
-  return { doc, changed: true };
+  return { doc, changed };
 }
 
 async function updateCounts(documentId, { chunkCount, factCount }) {
@@ -64,4 +62,10 @@ async function deleteDocument(documentId) {
   await cortexDb('document').where({ id: documentId }).del();
 }
 
-export { findBySourcePath, findByUid, upsert, updateCounts, getStats, listDocuments, deleteDocument };
+async function resetHash(documentId) {
+  await cortexDb('document')
+    .where({ id: documentId })
+    .update({ contentHash: null });
+}
+
+export { findBySourcePath, findByUid, upsert, updateCounts, resetHash, getStats, listDocuments, deleteDocument };

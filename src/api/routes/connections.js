@@ -2,121 +2,185 @@ import * as connectionStore from '../../ingestion/connectors/store.js';
 import { getConnector, listConnectorTypes } from '../../ingestion/connectors/registry.js';
 import { runSync } from '../../ingestion/sync/runner.js';
 import * as syncState from '../../ingestion/sync/state.js';
+import { AppError } from '../../lib/errors.js';
 
-async function connectionRoutes(app) {
-  // List available connector types
-  app.get('/api/connectors', async () => {
-    return { connectors: listConnectorTypes() };
-  });
+const uidParam = {
+  type: 'object',
+  required: ['uid'],
+  properties: {
+    uid: { type: 'string', minLength: 1 },
+  },
+};
 
-  // Get connector config schema
-  app.get('/api/connectors/:type/schema', async (request, reply) => {
-    try {
-      const ConnectorClass = await getConnector(request.params.type);
-      return { type: request.params.type, schema: ConnectorClass.configSchema() };
-    } catch (err) {
-      return reply.code(404).send({ error: err.message });
-    }
-  });
+const connectorTypeParam = {
+  type: 'object',
+  required: ['type'],
+  properties: {
+    type: { type: 'string', minLength: 1 },
+  },
+};
 
-  // List connections
-  app.get('/api/connections', async (request) => {
-    const { namespace, connectorType } = request.query;
-    const connections = await connectionStore.listConnections({ namespace, connectorType });
-    // Strip encrypted credentials from response
-    return {
-      connections: connections.map(stripCredentials),
-    };
-  });
+const listConnectionsSchema = {
+  querystring: {
+    type: 'object',
+    properties: {
+      namespace: { type: 'string' },
+      connectorType: { type: 'string' },
+    },
+  },
+};
 
-  // Get connection detail
-  app.get('/api/connections/:uid', async (request, reply) => {
-    const connection = await connectionStore.findByUid(request.params.uid);
-    if (!connection) return reply.code(404).send({ error: 'Connection not found' });
-    return { connection: stripCredentials(connection) };
-  });
+const getConnectionSchema = {
+  params: uidParam,
+};
 
-  // Create connection
-  app.post('/api/connections', async (request, reply) => {
-    const { name, connectorType, config, credentials, namespace } = request.body || {};
+const createConnectionSchema = {
+  body: {
+    type: 'object',
+    required: ['name', 'connectorType', 'namespace'],
+    properties: {
+      name: { type: 'string', minLength: 1 },
+      connectorType: { type: 'string', minLength: 1 },
+      namespace: { type: 'string', minLength: 1 },
+      config: { type: 'object', default: {} },
+      credentials: { type: 'object', default: {} },
+    },
+  },
+};
 
-    if (!name || !connectorType || !namespace) {
-      return reply.code(400).send({ error: 'name, connectorType, and namespace are required' });
-    }
+const syncSchema = {
+  params: uidParam,
+  body: {
+    type: 'object',
+    properties: {
+      syncType: { type: 'string', enum: ['full', 'incremental'], default: 'incremental' },
+      streams: { type: 'array', items: { type: 'string' } },
+    },
+  },
+};
 
-    const connection = await connectionStore.createConnection({
-      name,
-      connectorType,
-      config: config || {},
-      credentials: credentials || {},
-      namespace,
-    });
+const syncsListSchema = {
+  params: uidParam,
+  querystring: {
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', default: 20, minimum: 1, maximum: 200 },
+    },
+  },
+};
 
-    return { connection: stripCredentials(connection) };
-  });
+const connectorSchemaRoute = {
+  params: connectorTypeParam,
+};
 
-  // Test connection
-  app.post('/api/connections/:uid/check', async (request, reply) => {
-    const connection = await connectionStore.findByUid(request.params.uid);
-    if (!connection) return reply.code(404).send({ error: 'Connection not found' });
-
-    const ConnectorClass = await getConnector(connection.connectorType);
-    const credentials = connectionStore.getCredentials(connection);
-    const connector = new ConnectorClass(connection.config, credentials);
-
-    const result = await connector.check();
-    await connectionStore.updateStatus(connection.id, result.ok ? 'connected' : 'error');
-
-    return result;
-  });
-
-  // Discover streams/tables
-  app.get('/api/connections/:uid/discover', async (request, reply) => {
-    const connection = await connectionStore.findByUid(request.params.uid);
-    if (!connection) return reply.code(404).send({ error: 'Connection not found' });
-
-    const ConnectorClass = await getConnector(connection.connectorType);
-    const credentials = connectionStore.getCredentials(connection);
-    const connector = new ConnectorClass(connection.config, credentials);
-
-    const streams = await connector.discover();
-    return { streams };
-  });
-
-  // Delete connection
-  app.delete('/api/connections/:uid', async (request, reply) => {
-    const connection = await connectionStore.findByUid(request.params.uid);
-    if (!connection) return reply.code(404).send({ error: 'Connection not found' });
-
-    await connectionStore.deleteConnection(connection.id);
-    return { deleted: true, uid: connection.uid };
-  });
-
-  // Trigger sync
-  app.post('/api/connections/:uid/sync', async (request, reply) => {
-    const connection = await connectionStore.findByUid(request.params.uid);
-    if (!connection) return reply.code(404).send({ error: 'Connection not found' });
-
-    const { syncType = 'incremental', streams } = request.body || {};
-
-    const result = await runSync(connection.id, { syncType, streams });
-    return result;
-  });
-
-  // List sync runs for a connection
-  app.get('/api/connections/:uid/syncs', async (request, reply) => {
-    const connection = await connectionStore.findByUid(request.params.uid);
-    if (!connection) return reply.code(404).send({ error: 'Connection not found' });
-
-    const { limit = 20 } = request.query;
-    const runs = await syncState.listSyncRuns(connection.id, { limit: Number(limit) });
-    return { runs };
-  });
+async function requireConnection(uid) {
+  const connection = await connectionStore.findByUid(uid);
+  if (!connection) throw new AppError({ errorCode: 'NOT_FOUND', message: 'Connection not found' });
+  return connection;
 }
 
 function stripCredentials(connection) {
   const { credentialsEncrypted, ...rest } = connection;
   return { ...rest, hasCredentials: !!credentialsEncrypted };
+}
+
+async function handleListConnectorTypes() {
+  return { connectors: listConnectorTypes() };
+}
+
+async function handleGetConnectorSchema(request) {
+  try {
+    const ConnectorClass = await getConnector(request.params.type);
+    return { type: request.params.type, schema: ConnectorClass.configSchema() };
+  } catch (err) {
+    throw new AppError({ errorCode: 'NOT_FOUND', message: err.message });
+  }
+}
+
+async function handleListConnections(request) {
+  const { namespace, connectorType } = request.query;
+  const connections = await connectionStore.listConnections({ namespace, connectorType });
+  return { connections: connections.map(stripCredentials) };
+}
+
+async function handleGetConnection(request) {
+  const connection = await requireConnection(request.params.uid);
+  return { connection: stripCredentials(connection) };
+}
+
+async function handleCreateConnection(request) {
+  const { name, connectorType, config, credentials, namespace } = request.body;
+
+  const connection = await connectionStore.createConnection({
+    name,
+    connectorType,
+    config,
+    credentials,
+    namespace,
+  });
+
+  return { connection: stripCredentials(connection) };
+}
+
+async function handleCheckConnection(request) {
+  const connection = await requireConnection(request.params.uid);
+
+  const ConnectorClass = await getConnector(connection.connectorType);
+  const credentials = connectionStore.getCredentials(connection);
+  const connector = new ConnectorClass(connection.config, credentials);
+
+  const result = await connector.check();
+  await connectionStore.updateStatus(connection.id, result.ok ? 'connected' : 'error');
+
+  return result;
+}
+
+async function handleDiscover(request) {
+  const connection = await requireConnection(request.params.uid);
+
+  const ConnectorClass = await getConnector(connection.connectorType);
+  const credentials = connectionStore.getCredentials(connection);
+  const connector = new ConnectorClass(connection.config, credentials);
+
+  const streams = await connector.discover();
+  return { streams };
+}
+
+async function handleDeleteConnection(request) {
+  const connection = await requireConnection(request.params.uid);
+
+  await connectionStore.deleteConnection(connection.id);
+  return { deleted: true, uid: connection.uid };
+}
+
+async function handleSync(request) {
+  const connection = await requireConnection(request.params.uid);
+  const { syncType, streams } = request.body;
+
+  const result = await runSync(connection.id, { syncType, streams });
+  return result;
+}
+
+async function handleListSyncs(request) {
+  const connection = await requireConnection(request.params.uid);
+  const { limit } = request.query;
+
+  const runs = await syncState.listSyncRuns(connection.id, { limit });
+  return { runs };
+}
+
+async function connectionRoutes(app) {
+  app.get('/api/connectors', handleListConnectorTypes);
+  app.get('/api/connectors/:type/schema', { schema: connectorSchemaRoute }, handleGetConnectorSchema);
+
+  app.get('/api/connections', { schema: listConnectionsSchema }, handleListConnections);
+  app.get('/api/connections/:uid', { schema: getConnectionSchema }, handleGetConnection);
+  app.post('/api/connections', { schema: createConnectionSchema }, handleCreateConnection);
+  app.post('/api/connections/:uid/check', { schema: { params: uidParam } }, handleCheckConnection);
+  app.get('/api/connections/:uid/discover', { schema: { params: uidParam } }, handleDiscover);
+  app.delete('/api/connections/:uid', { schema: { params: uidParam } }, handleDeleteConnection);
+  app.post('/api/connections/:uid/sync', { schema: syncSchema }, handleSync);
+  app.get('/api/connections/:uid/syncs', { schema: syncsListSchema }, handleListSyncs);
 }
 
 export default connectionRoutes;

@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { nanoid } from 'nanoid';
 import path from 'node:path';
 
 import cortexDb from '../../db/cortex.js';
@@ -71,7 +71,7 @@ async function audmDecide(newContent, existingContent) {
 // ── Core CRUD ───────────────────────────────────────────────────────────────
 
 async function insertFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection, embedding }) {
-  const uid = `fact-${randomUUID().slice(0, 8)}`;
+  const uid = `fact-${nanoid(16)}`;
 
   const [fact] = await cortexDb('fact')
     .insert({
@@ -203,6 +203,19 @@ async function getHotFacts(namespace, { limit = 10, since } = {}) {
   return query;
 }
 
+async function listFacts({ namespace, limit = 50, offset = 0, category } = {}) {
+  const query = cortexDb('fact')
+    .where({ status: 'active' })
+    .select('id', 'uid', 'content', 'category', 'confidence', 'importance', 'createdAt', 'namespace')
+    .orderBy('createdAt', 'desc')
+    .limit(limit)
+    .offset(offset);
+
+  if (namespace) query.where({ namespace });
+  if (category) query.where({ category });
+  return query;
+}
+
 async function getFactCount(namespace) {
   const query = cortexDb('fact').where({ status: 'active' });
   if (namespace) query.where({ namespace });
@@ -214,6 +227,7 @@ export {
   saveFact,
   insertFact,
   findByUid,
+  listFacts,
   listByCategory,
   listByDocument,
   markContradicted,

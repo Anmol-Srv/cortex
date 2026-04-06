@@ -34,9 +34,13 @@ Respond with a JSON array of ${chunks.length} context prefix strings.`;
   try {
     const prefixes = await promptJson(fullPrompt, { model: config.llm.extractionModel });
 
-    if (!Array.isArray(prefixes) || prefixes.length !== chunks.length) {
-      console.warn('[contextualizer] Prefix count mismatch — skipping contextual enrichment');
+    if (!Array.isArray(prefixes)) {
+      console.warn('[contextualizer] LLM did not return an array — skipping');
       return chunks;
+    }
+
+    if (prefixes.length !== chunks.length) {
+      console.warn(`[contextualizer] Got ${prefixes.length} prefixes for ${chunks.length} chunks — using partial`);
     }
 
     return chunks.map((chunk, i) => ({

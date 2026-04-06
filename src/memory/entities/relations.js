@@ -1,33 +1,15 @@
 import cortexDb from '../../db/cortex.js';
 
 async function createRelation({ sourceId, targetId, relationType, sourceFactId, validAt }) {
-  const existing = await findRelation(sourceId, targetId, relationType);
-
-  if (existing) {
-    await cortexDb('relation')
-      .where({ id: existing.id })
-      .increment('mentionCount', 1);
-
-    if (sourceFactId) {
-      await cortexDb('relation')
-        .where({ id: existing.id })
-        .update({ sourceFactId });
-    }
-
-    return { ...existing, mentionCount: existing.mentionCount + 1 };
-  }
-
-  const [relation] = await cortexDb('relation')
-    .insert({
-      sourceId,
-      targetId,
-      relationType,
-      sourceFactId: sourceFactId || null,
-      mentionCount: 1,
-      validAt: validAt || null,
-      invalidAt: null,
-    })
-    .returning('*');
+  const { rows: [relation] } = await cortexDb.raw(`
+    INSERT INTO relation (source_id, target_id, relation_type, source_fact_id, mention_count, valid_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 1, ?, NOW(), NOW())
+    ON CONFLICT (source_id, target_id, relation_type) DO UPDATE SET
+      mention_count = relation.mention_count + 1,
+      source_fact_id = COALESCE(EXCLUDED.source_fact_id, relation.source_fact_id),
+      updated_at = NOW()
+    RETURNING *
+  `, [sourceId, targetId, relationType, sourceFactId || null, validAt || null]);
 
   return relation;
 }

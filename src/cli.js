@@ -15,7 +15,6 @@ Commands:
   status                   Show knowledge base statistics
   migrate                  Run database migrations
   reset                    Reset the database (drops all data)
-  keys                     Manage API keys
 
 Options:
   --help                   Show this help message
@@ -33,7 +32,6 @@ const commands = {
   status: runStatus,
   migrate: runMigrate,
   reset: runReset,
-  keys: runKeys,
 };
 
 const handler = commands[command];
@@ -123,7 +121,7 @@ Examples:
           console.log(`  Skipped (unchanged)`);
         } else {
           results.success.push(source.title);
-          console.log(`  Done — ${result.chunks} chunks, ${result.facts} facts`);
+          console.log(`  Done — ${result.chunkCount} chunks, ${result.facts.total} facts (${result.facts.added} new, ${result.facts.updated} updated)`);
         }
       }
     } catch (err) {
@@ -242,12 +240,14 @@ Usage:
 
   const cortexDb = (await import('./db/cortex.js')).default;
 
+  const migrationConfig = { directory: './src/db/migrations' };
+
   if (args.includes('--rollback')) {
-    const [batch, migrations] = await cortexDb.migrate.rollback();
+    const [batch, migrations] = await cortexDb.migrate.rollback(migrationConfig);
     console.log(`Rolled back batch ${batch}: ${migrations.length} migrations`);
     for (const m of migrations) console.log(`  ${m}`);
   } else {
-    const [batch, migrations] = await cortexDb.migrate.latest();
+    const [batch, migrations] = await cortexDb.migrate.latest(migrationConfig);
     if (migrations.length) {
       console.log(`Ran batch ${batch}: ${migrations.length} migrations`);
       for (const m of migrations) console.log(`  ${m}`);
@@ -277,73 +277,11 @@ Requires --confirm flag to prevent accidental data loss.`);
 
   const cortexDb = (await import('./db/cortex.js')).default;
 
-  await cortexDb.migrate.rollback(true);
-  await cortexDb.migrate.latest();
+  const migrationConfig = { directory: './src/db/migrations' };
+  await cortexDb.migrate.rollback(migrationConfig, true);
+  await cortexDb.migrate.latest(migrationConfig);
 
   console.log('Database reset complete. All migrations re-applied.');
   await cortexDb.destroy();
 }
 
-async function runKeys(args) {
-  const sub = args[0];
-  const flags = args.filter((a) => a.startsWith('--'));
-
-  if (!sub || sub === '--help') {
-    console.log(`cortex keys — Manage API keys
-
-Usage:
-  cortex keys list                      List all API keys
-  cortex keys create --name=<n>         Create a new API key
-  cortex keys revoke --id=<id>          Revoke an API key
-
-Create options:
-  --name=<name>         Key name (required)
-  --namespace=<ns>      Allowed namespaces (comma-separated)
-  --role=<role>         Role: reader or admin (default: reader)`);
-    process.exit(0);
-  }
-
-  const { createApiKey, listApiKeys, revokeApiKey } = await import('./api/auth.js');
-  const cortexDb = (await import('./db/cortex.js')).default;
-
-  if (sub === 'list') {
-    const keys = await listApiKeys();
-    if (!keys.length) {
-      console.log('No API keys. Auth is bypassed in dev mode.');
-    } else {
-      for (const k of keys) {
-        const ns = k.namespaces?.length ? k.namespaces.join(',') : 'all';
-        const status = k.active ? 'active' : 'revoked';
-        console.log(`  [${k.id}] ${k.name} — ${k.role} — ns:${ns} — ${status}`);
-      }
-    }
-  } else if (sub === 'create') {
-    const name = flags.find((f) => f.startsWith('--name='))?.split('=')[1];
-    if (!name) {
-      console.error('--name is required');
-      process.exit(1);
-    }
-    const nsFlag = flags.find((f) => f.startsWith('--namespace='))?.split('=')[1];
-    const namespaces = nsFlag ? nsFlag.split(',') : [];
-    const role = flags.find((f) => f.startsWith('--role='))?.split('=')[1] || 'reader';
-
-    const result = await createApiKey({ name, namespaces, role });
-    console.log(`API key created:`);
-    console.log(`  Key: ${result.key}`);
-    console.log(`  ID:  ${result.id}`);
-    console.log(`  Save this key — it cannot be retrieved again.`);
-  } else if (sub === 'revoke') {
-    const id = flags.find((f) => f.startsWith('--id='))?.split('=')[1];
-    if (!id) {
-      console.error('--id is required');
-      process.exit(1);
-    }
-    await revokeApiKey(Number(id));
-    console.log(`API key ${id} revoked.`);
-  } else {
-    console.error(`Unknown subcommand: ${sub}`);
-    process.exit(1);
-  }
-
-  await cortexDb.destroy();
-}

@@ -9,9 +9,10 @@ import { embedBatch } from './embedder.js';
 import { contextualizeChunks } from './contextualizer.js';
 import * as documentStore from '../memory/documents/store.js';
 import * as chunkStore from '../memory/chunks/store.js';
-import { extractFacts } from '../memory/facts/extractor.js';
+import { extractFactsFromChunks } from '../memory/facts/extractor.js';
 import { saveFact } from '../memory/facts/store.js';
 import { DEFAULT_CATEGORIES } from '../memory/facts/categories.js';
+import { classifyInput } from '../memory/cognitive/input-classifier.js';
 import { linkDocumentEntities } from '../memory/entities/linker.js';
 import { renderKnowledgeFile } from '../generators/markdown/renderer.js';
 import { writeOutput } from '../generators/output.js';
@@ -41,15 +42,30 @@ async function ingestDocument({
   skipEntities = false,
   skipMarkdown = false,
   skipContextualization = false,
+  classify = true,
 }) {
   const ns = namespace || config.defaults.namespace;
   const cats = categories || Object.keys(DEFAULT_CATEGORIES);
   const prompt = promptPath || DEFAULT_PROMPT_PATH;
+  let finalTitle = title || sourcePath;
+
+  // Step 0: Classify input (cognitive layer)
+  let classification = null;
+  if (classify) {
+    console.log('[0/6] Classifying input...');
+    classification = await classifyInput(content, { title: finalTitle });
+    console.log(`  Route: ${classification.route} — ${classification.reasoning}`);
+
+    if (classification.route === 'noise') {
+      console.log('  Skipped — classified as noise.');
+      return { documentId: null, title: finalTitle, skipped: true, route: 'noise' };
+    }
+  }
 
   // Step 1: Parse content into text + sections
   console.log('[1/6] Parsing content...');
   const parsed = parse(content, { format: metadata.format, filePath: sourcePath, contentType });
-  const resolvedTitle = title || parsed.metadata?.title || sourcePath;
+  finalTitle = title || parsed.metadata?.title || sourcePath;
 
   // Step 2: Hash for change detection + upsert document
   console.log('[2/6] Checking for changes...');
@@ -57,85 +73,125 @@ async function ingestDocument({
   const { doc, changed } = await documentStore.upsert({
     sourcePath,
     sourceType,
-    title: resolvedTitle,
+    title: finalTitle,
     contentHash,
     namespace: ns,
   });
 
   if (!changed) {
     console.log('  Skipped — content unchanged.');
-    return { documentId: doc.id, title: resolvedTitle, skipped: true };
+    return { documentId: doc.id, title: finalTitle, skipped: true };
   }
 
-  // Step 3: Chunk + contextualize + embed
-  console.log('[3/6] Chunking and embedding...');
-  let chunks = chunkSections(parsed.sections);
-  console.log(`  ${chunks.length} chunks created`);
-
-  if (!skipContextualization && chunks.length) {
-    chunks = await contextualizeChunks(chunks, parsed.text, { title: resolvedTitle });
-  }
-
-  const texts = chunks.map((c) => {
-    const prefix = c.contextualPrefix;
-    return prefix ? `${prefix}\n${c.content}` : c.content;
-  });
-  const embeddings = await embedBatch(texts);
-
-  const chunksWithEmbeddings = chunks.map((chunk, i) => ({
-    ...chunk,
-    embedding: embeddings[i],
-  }));
-
-  await chunkStore.insertChunks(doc.id, chunksWithEmbeddings, ns);
-
-  // Step 4: Extract facts
-  let factResult = { counts: { total: 0, added: 0, skipped: 0, updated: 0, contradicted: 0 }, results: [] };
-
-  if (!skipFacts) {
-    console.log('[4/6] Extracting facts...');
-    factResult = await extractAndStoreFacts(parsed.text, {
+  // Thought fast-path: store facts directly, skip chunking/extraction
+  if (classification?.route === 'thought' && classification.facts.length) {
+    console.log(`[thought] Storing ${classification.facts.length} facts directly...`);
+    const thoughtResult = await storeDirectFacts(classification.facts, {
       documentId: doc.id,
       namespace: ns,
-      promptPath: prompt,
-      categories: cats,
     });
+
+    let entityResult = { entityCount: 0, relationCount: 0, factEntityLinks: 0, topics: [] };
+    if (!skipEntities && thoughtResult.results.length) {
+      entityResult = await linkDocumentEntities(
+        { title: finalTitle, sourceType, metadata },
+        thoughtResult.results,
+        ns,
+        entities,
+      );
+    }
+
+    await documentStore.updateCounts(doc.id, { chunkCount: 0, factCount: thoughtResult.counts.added });
+
+    console.log(`Done. Route: thought, ${thoughtResult.counts.total} facts (${thoughtResult.counts.added} new)`);
+    return {
+      documentId: doc.id,
+      documentUid: doc.uid,
+      title: finalTitle,
+      skipped: false,
+      route: 'thought',
+      chunkCount: 0,
+      facts: thoughtResult.counts,
+      entities: entityResult,
+      md: null,
+    };
   }
 
-  await documentStore.updateCounts(doc.id, {
-    chunkCount: chunks.length,
-    factCount: factResult.counts.added + factResult.counts.updated + factResult.counts.contradicted,
-  });
-
-  // Step 5: Link entities
+  let chunks = [];
+  let factResult = { counts: { total: 0, added: 0, skipped: 0, updated: 0, contradicted: 0 }, results: [] };
   let entityResult = { entityCount: 0, relationCount: 0, factEntityLinks: 0, topics: [] };
-
-  if (!skipEntities && factResult.results.length) {
-    console.log('[5/6] Linking entities...');
-    entityResult = await linkDocumentEntities({
-      title: resolvedTitle,
-      sourceType,
-      metadata,
-    }, factResult.results, ns, entities);
-    console.log(`  ${entityResult.entityCount} entities, ${entityResult.relationCount} relations`);
-  }
-
-  // Step 6: Generate markdown
   let mdResult = null;
 
-  if (!skipMarkdown) {
-    console.log('[6/6] Generating markdown...');
-    mdResult = await generateMd({
-      uid: doc.uid,
-      title: resolvedTitle,
-      sourceType,
-      sourcePath,
-      namespace: ns,
-      sections: parsed.sections,
-      factResult,
-      entityResult,
-      metadata,
+  try {
+    // Step 3: Chunk + contextualize + embed
+    console.log('[3/6] Chunking and embedding...');
+    chunks = chunkSections(parsed.sections);
+    console.log(`  ${chunks.length} chunks created`);
+
+    if (!skipContextualization && chunks.length) {
+      chunks = await contextualizeChunks(chunks, parsed.text, { title: finalTitle });
+    }
+
+    const texts = chunks.map((c) => {
+      const prefix = c.contextualPrefix;
+      return prefix ? `${prefix}\n${c.content}` : c.content;
     });
+    const embeddings = await embedBatch(texts);
+
+    const chunksWithEmbeddings = chunks.map((chunk, i) => ({
+      ...chunk,
+      embedding: embeddings[i],
+    }));
+
+    await chunkStore.insertChunks(doc.id, chunksWithEmbeddings, ns);
+
+    // Step 4: Extract facts per chunk
+    if (!skipFacts) {
+      console.log('[4/6] Extracting facts...');
+      factResult = await extractAndStoreFacts(chunks, {
+        documentId: doc.id,
+        namespace: ns,
+        promptPath: prompt,
+        categories: cats,
+      });
+    }
+
+    await documentStore.updateCounts(doc.id, {
+      chunkCount: chunks.length,
+      factCount: factResult.counts.added + factResult.counts.updated + factResult.counts.contradicted,
+    });
+
+    // Step 5: Link entities
+    if (!skipEntities && factResult.results.length) {
+      console.log('[5/6] Linking entities...');
+      entityResult = await linkDocumentEntities({
+        title: finalTitle,
+        sourceType,
+        metadata,
+      }, factResult.results, ns, entities);
+      console.log(`  ${entityResult.entityCount} entities, ${entityResult.relationCount} relations`);
+    }
+
+    // Step 6: Generate markdown
+    if (!skipMarkdown) {
+      console.log('[6/6] Generating markdown...');
+      mdResult = await generateMd({
+        uid: doc.uid,
+        title: finalTitle,
+        sourceType,
+        sourcePath,
+        namespace: ns,
+        sections: parsed.sections,
+        factResult,
+        entityResult,
+        metadata,
+      });
+    }
+  } catch (err) {
+    // Reset content hash so re-ingest doesn't skip this document
+    console.error(`[pipeline] Failed after document upsert: ${err.message}`);
+    await documentStore.resetHash(doc.id).catch(() => {});
+    throw err;
   }
 
   console.log(`Done. ${chunks.length} chunks, ${factResult.counts.total} facts, ${entityResult.entityCount} entities`);
@@ -143,7 +199,7 @@ async function ingestDocument({
   return {
     documentId: doc.id,
     documentUid: doc.uid,
-    title: resolvedTitle,
+    title: finalTitle,
     skipped: false,
     chunkCount: chunks.length,
     facts: factResult.counts,
@@ -152,13 +208,39 @@ async function ingestDocument({
   };
 }
 
-async function extractAndStoreFacts(text, { documentId, namespace, promptPath, categories }) {
+async function storeDirectFacts(facts, { documentId, namespace }) {
+  const counts = { total: facts.length, added: 0, skipped: 0, updated: 0, contradicted: 0 };
+  const results = [];
+
+  for (const raw of facts) {
+    const result = await saveFact({
+      content: raw.content,
+      category: raw.category,
+      confidence: raw.confidence || 'high',
+      importance: raw.importance || 'vital',
+      namespace,
+      sourceDocumentIds: documentId ? [documentId] : [],
+      sourceSection: raw.category,
+    });
+
+    results.push(result);
+    const action = result.action.toLowerCase();
+    if (action === 'add') counts.added++;
+    else if (action === 'skip') counts.skipped++;
+    else if (action === 'update') counts.updated++;
+    else if (action === 'contradict') counts.contradicted++;
+  }
+
+  return { counts, results };
+}
+
+async function extractAndStoreFacts(chunks, { documentId, namespace, promptPath, categories }) {
   const counts = { total: 0, added: 0, skipped: 0, updated: 0, contradicted: 0 };
   const results = [];
 
-  const rawFacts = await extractFacts(text, { promptPath, categories });
+  const rawFacts = await extractFactsFromChunks(chunks, { promptPath, categories });
   counts.total = rawFacts.length;
-  console.log(`  ${rawFacts.length} facts extracted`);
+  console.log(`  ${rawFacts.length} facts extracted from ${chunks.length} chunks`);
 
   for (const raw of rawFacts) {
     const result = await saveFact({
@@ -168,7 +250,7 @@ async function extractAndStoreFacts(text, { documentId, namespace, promptPath, c
       importance: raw.importance || 'supplementary',
       namespace,
       sourceDocumentIds: documentId ? [documentId] : [],
-      sourceSection: raw.category,
+      sourceSection: raw.sourceSection || raw.category,
     });
 
     results.push(result);
