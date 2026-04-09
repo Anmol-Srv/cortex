@@ -1,16 +1,21 @@
 import { readFile } from 'node:fs/promises';
+import { chunk as batchChunk } from 'lodash-es';
 
-import { prompt, parseJson } from '../../lib/llm.js';
+import { promptJson } from '../../lib/llm.js';
 import config from '../../config.js';
 
-/**
- * Generic fact extraction. Takes plain text + a prompt file + valid categories.
- * The calling pipeline is responsible for formatting its domain data into text.
- */
-async function extractFacts(text, { promptPath, categories }) {
-  const systemPrompt = await readFile(promptPath, 'utf8');
+const CONCURRENCY = 5;
 
-  const fullPrompt = `${systemPrompt}
+function buildChunkText(chunk) {
+  const parts = [];
+  if (chunk.sectionHeading) parts.push(`[Section: ${chunk.sectionHeading}]`);
+  if (chunk.contextualPrefix) parts.push(chunk.contextualPrefix);
+  parts.push(chunk.content);
+  return parts.join('\n');
+}
+
+function buildPrompt(systemPrompt, text, categories) {
+  return `${systemPrompt}
 
 ---
 
@@ -25,13 +30,12 @@ Respond with ONLY a JSON array of facts. Each fact object must have exactly thes
 - "importance" (string): "vital" if essential to understanding the topic, "supplementary" if supporting detail
 
 Output the JSON array directly, no explanation or wrapping.`;
+}
 
-  const response = await prompt(fullPrompt, { model: config.llm.extractionModel });
-  const parsed = parseJson(response);
-
-  if (!Array.isArray(parsed)) return [];
-
-  return parsed
+function validateFacts(parsed, categories) {
+  const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.facts) ? parsed.facts : null;
+  if (!arr) return [];
+  return arr
     .filter((f) => f.content && categories.includes(f.category) && ['high', 'medium', 'low'].includes(f.confidence))
     .map((f) => ({
       ...f,
@@ -39,4 +43,38 @@ Output the JSON array directly, no explanation or wrapping.`;
     }));
 }
 
-export { extractFacts };
+async function extractFactsFromChunk(chunk, systemPrompt, categories) {
+  const text = buildChunkText(chunk);
+  const fullPrompt = buildPrompt(systemPrompt, text, categories);
+
+  const parsed = await promptJson(fullPrompt, { model: config.llm.extractionModel, caller: 'extractor' });
+  const facts = validateFacts(parsed, categories);
+
+  return facts.map((f) => ({ ...f, sourceSection: chunk.sectionHeading || null }));
+}
+
+/**
+ * Extract facts from each chunk independently, in parallel batches.
+ * Uses section heading + contextual prefix for richer per-chunk context.
+ */
+async function extractFactsFromChunks(chunks, { promptPath, categories }) {
+  if (!chunks.length) return [];
+
+  const systemPrompt = await readFile(promptPath, 'utf8');
+  const batches = batchChunk(chunks, CONCURRENCY);
+  const allFacts = [];
+
+  for (const batch of batches) {
+    const results = await Promise.all(
+      batch.map((c) => extractFactsFromChunk(c, systemPrompt, categories).catch((err) => {
+        console.error(`[extractor] chunk failed: ${err.message}`);
+        return [];
+      })),
+    );
+    allFacts.push(...results.flat());
+  }
+
+  return allFacts;
+}
+
+export { extractFactsFromChunks };

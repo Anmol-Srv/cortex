@@ -15,7 +15,7 @@ async function searchChunks(query, { namespaces, limit = 20 }) {
   return rows;
 }
 
-async function searchFacts(query, { namespaces, limit = 20, minConfidence = 'medium', pointInTime }) {
+async function searchFacts(query, { namespaces, limit = 20, minConfidence = 'medium', pointInTime, categories }) {
   const confidenceRank = { low: 0, medium: 1, high: 2 };
   const minRank = confidenceRank[minConfidence] ?? 1;
 
@@ -24,6 +24,12 @@ async function searchFacts(query, { namespaces, limit = 20, minConfidence = 'med
   if (pointInTime) {
     temporalFilter = 'AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)';
     params.push(pointInTime, pointInTime);
+  }
+
+  let categoryFilter = '';
+  if (categories?.length) {
+    categoryFilter = 'AND category = ANY(?)';
+    params.push(categories);
   }
 
   params.push(limit);
@@ -43,6 +49,7 @@ async function searchFacts(query, { namespaces, limit = 20, minConfidence = 'med
             ELSE 0
           END >= ?
       ${temporalFilter}
+      ${categoryFilter}
     ORDER BY rank DESC
     LIMIT ?
   `, params);

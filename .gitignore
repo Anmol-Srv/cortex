@@ -4,3 +4,9 @@ node_modules/
 .DS_Store
 output/
 .claude/
+*.tgz
+social-preview*
+IMPROVEMENTS.md
+PLAN.md
+PROJECT.md
+RESEARCH.md

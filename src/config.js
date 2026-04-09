@@ -16,11 +16,27 @@ const config = {
   },
 
   llm: {
-    provider: process.env.LLM_PROVIDER || 'anthropic',
+    provider: process.env.LLM_PROVIDER || 'openai',
+
+    // OpenAI
+    openaiApiKey: process.env.OPENAI_API_KEY || '',
+    openaiModel: process.env.LLM_OPENAI_MODEL || 'gpt-4o-mini',
+
+    // Ollama
+    ollamaHost: process.env.LLM_OLLAMA_HOST || process.env.OLLAMA_HOST || 'http://localhost:11434',
+    ollamaModel: process.env.LLM_OLLAMA_MODEL || 'qwen2.5:7b',
+
+    // Claude CLI (dev — uses your Claude Code subscription)
+    cliModel: process.env.LLM_CLI_MODEL || 'haiku',
+
+    // Anthropic
     apiKey: process.env.ANTHROPIC_API_KEY || '',
-    extractionModel: process.env.LLM_EXTRACTION_MODEL || 'claude-haiku-4-5-20251001',
-    decisionModel: process.env.LLM_DECISION_MODEL || 'claude-sonnet-4-6',
-    entityModel: process.env.LLM_ENTITY_MODEL || 'claude-haiku-4-5-20251001',
+
+    // Per-task model overrides (use provider-specific model names)
+    extractionModel: process.env.LLM_EXTRACTION_MODEL || '',
+    decisionModel: process.env.LLM_DECISION_MODEL || '',
+    entityModel: process.env.LLM_ENTITY_MODEL || '',
+
     maxRetries: Number(process.env.LLM_MAX_RETRIES) || 3,
   },
 
@@ -45,6 +61,15 @@ const config = {
 
   defaults: {
     namespace: process.env.DEFAULT_NAMESPACE || 'default',
+  },
+
+  memory: {
+    // AUDM dedup: skip if similarity >= this (paraphrase of same fact)
+    skipThreshold: Number(process.env.MEMORY_SKIP_THRESHOLD) || 0.88,
+    // AUDM dedup: ask LLM if similarity >= this (possibly related)
+    ambiguousThreshold: Number(process.env.MEMORY_AMBIGUOUS_THRESHOLD) || 0.65,
+    // Search: discard results below this cosine similarity floor
+    minFactSimilarity: Number(process.env.MEMORY_MIN_FACT_SIMILARITY) || 0.45,
   },
 };
 

@@ -1,4 +1,5 @@
 import cortexDb from '../../db/cortex.js';
+import config from '../../config.js';
 
 async function searchChunks(embedding, { namespaces, limit = 20 }) {
   const vec = `[${embedding.join(',')}]`;
@@ -17,7 +18,7 @@ async function searchChunks(embedding, { namespaces, limit = 20 }) {
   return rows;
 }
 
-async function searchFacts(embedding, { namespaces, limit = 20, minConfidence = 'medium', pointInTime }) {
+async function searchFacts(embedding, { namespaces, limit = 20, minConfidence = 'medium', pointInTime, categories }) {
   const vec = `[${embedding.join(',')}]`;
   const confidenceRank = { low: 0, medium: 1, high: 2 };
   const minRank = confidenceRank[minConfidence] ?? 1;
@@ -29,7 +30,13 @@ async function searchFacts(embedding, { namespaces, limit = 20, minConfidence = 
     params.push(pointInTime, pointInTime);
   }
 
-  params.push(vec, limit);
+  let categoryFilter = '';
+  if (categories?.length) {
+    categoryFilter = 'AND category = ANY(?)';
+    params.push(categories);
+  }
+
+  params.push(vec, config.memory.minFactSimilarity, vec, limit);
 
   const { rows } = await cortexDb.raw(`
     SELECT id, uid, content, category, confidence, importance, namespace, status,
@@ -46,6 +53,8 @@ async function searchFacts(embedding, { namespaces, limit = 20, minConfidence = 
             ELSE 0
           END >= ?
       ${temporalFilter}
+      ${categoryFilter}
+      AND 1 - (embedding <=> ?) >= ?
     ORDER BY embedding <=> ?
     LIMIT ?
   `, params);

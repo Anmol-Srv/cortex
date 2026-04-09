@@ -12,7 +12,6 @@ const inputs = args.filter((a) => !a.startsWith('--'));
 const namespace = flags.find((f) => f.startsWith('--namespace='))?.split('=')[1];
 const skipFacts = flags.includes('--skip-facts');
 const skipEntities = flags.includes('--skip-entities');
-const skipMarkdown = flags.includes('--skip-markdown');
 
 if (!inputs.length) {
   console.error(`Usage: node src/scripts/ingest.js <file|url|glob> [options]
@@ -21,7 +20,6 @@ Options:
   --namespace=<ns>    Namespace (default: from config)
   --skip-facts        Skip fact extraction
   --skip-entities     Skip entity linking
-  --skip-markdown     Skip markdown generation
 
 Examples:
   node src/scripts/ingest.js ./docs/README.md
@@ -62,7 +60,6 @@ for (const input of inputs) {
         metadata: source.metadata,
         skipFacts,
         skipEntities,
-        skipMarkdown,
       });
 
       if (result.skipped) {

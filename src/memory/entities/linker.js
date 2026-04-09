@@ -111,6 +111,19 @@ async function linkCustomEntities({ entityDefs, factObjects, firstFactId, namesp
 }
 
 async function linkDefaultEntities({ title, sourceType, metadata, factObjects, firstFactId, namespace, today }) {
+  if (!title) {
+    // Thoughts have no title — skip document entity, only resolve topics
+    const topics = factObjects.length
+      ? await resolveTopicsFromFacts(factObjects, { promptPath: ENTITY_PROMPT, namespace })
+      : [];
+    return {
+      entityCount: topics.length,
+      relationCount: 0,
+      factEntityLinks: 0,
+      topics: topics.map((e) => e.name),
+    };
+  }
+
   const docEntity = await resolveEntity({
     name: title,
     entityType: 'document',

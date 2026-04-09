@@ -1,4 +1,4 @@
-import { CortexError } from '../../lib/errors.js';
+import { AppError } from '../../lib/errors.js';
 
 const CONNECTOR_REGISTRY = {
   postgres: {
@@ -10,7 +10,7 @@ const CONNECTOR_REGISTRY = {
 async function getConnector(type) {
   const entry = CONNECTOR_REGISTRY[type];
   if (!entry) {
-    throw new CortexError('UNKNOWN_CONNECTOR', `No connector registered for type: ${type}`);
+    throw new AppError({ errorCode: 'NOT_FOUND', message: `No connector registered for type: ${type}` });
   }
   const mod = await entry.module();
   return mod.default;

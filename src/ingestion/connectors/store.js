@@ -1,10 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { nanoid } from 'nanoid';
 
 import cortexDb from '../../db/cortex.js';
 import { encryptJson, decryptJson } from '../../lib/crypto.js';
 
 async function createConnection({ name, connectorType, config, credentials, namespace }) {
-  const uid = `conn-${randomUUID().slice(0, 8)}`;
+  const uid = `conn-${nanoid(16)}`;
   const credentialsEncrypted = credentials ? encryptJson(credentials) : null;
 
   const [row] = await cortexDb('connection')

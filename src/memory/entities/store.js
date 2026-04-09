@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { nanoid } from 'nanoid';
 
 import cortexDb from '../../db/cortex.js';
 
 async function insertEntity({ name, entityType, description, namespace, externalId, embedding }) {
-  const uid = `ent-${randomUUID().slice(0, 8)}`;
+  const uid = `ent-${nanoid(16)}`;
 
   const [entity] = await cortexDb('entity')
     .insert({
