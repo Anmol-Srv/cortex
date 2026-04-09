@@ -1,0 +1,23 @@
+# Test files
+**/*.test.js
+vitest.config.js
+
+# Dev scripts
+src/scripts/
+
+# Dev artifacts
+src/api/mcp-chat-config.json
+.env
+.env.*
+docker-compose.yml
+
+# Project docs (not needed at runtime)
+CLAUDE.md
+IMPROVEMENTS.md
+PROJECT.md
+RESEARCH.md
+PLAN.md
+architecture.html
+social-preview*
+output/
+config/

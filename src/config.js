@@ -62,6 +62,15 @@ const config = {
   defaults: {
     namespace: process.env.DEFAULT_NAMESPACE || 'default',
   },
+
+  memory: {
+    // AUDM dedup: skip if similarity >= this (paraphrase of same fact)
+    skipThreshold: Number(process.env.MEMORY_SKIP_THRESHOLD) || 0.88,
+    // AUDM dedup: ask LLM if similarity >= this (possibly related)
+    ambiguousThreshold: Number(process.env.MEMORY_AMBIGUOUS_THRESHOLD) || 0.65,
+    // Search: discard results below this cosine similarity floor
+    minFactSimilarity: Number(process.env.MEMORY_MIN_FACT_SIMILARITY) || 0.45,
+  },
 };
 
 export default config;

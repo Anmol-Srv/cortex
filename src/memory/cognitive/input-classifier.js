@@ -38,7 +38,7 @@ Input: ${content}
 Respond with ONLY a JSON object: { "route": "thought|knowledge|noise", "facts": [{"content":"...","category":"...","confidence":"high|medium|low","importance":"vital|supplementary"}], "entities": ["..."], "reasoning": "..." }`;
 
   try {
-    const result = await promptJson(input, { model: config.llm.extractionModel });
+    const result = await promptJson(input, { model: config.llm.extractionModel, caller: 'classifier' });
 
     if (!result || !VALID_ROUTES.includes(result.route)) {
       return fallback('Invalid classification result');

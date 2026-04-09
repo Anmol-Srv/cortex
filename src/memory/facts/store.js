@@ -12,15 +12,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUDM_PROMPT_PATH = path.join(__dirname, '../../../prompts/audm-decision.md');
 
 // Paraphrased content with nomic-embed-text typically lands 0.75-0.88.
-const SKIP_THRESHOLD = 0.88;
-const AMBIGUOUS_THRESHOLD = 0.65;
+const SKIP_THRESHOLD = config.memory.skipThreshold;
+const AMBIGUOUS_THRESHOLD = config.memory.ambiguousThreshold;
 
 /**
  * AUDM pipeline: Add, Update, Delete (contradict), or Merge.
  * For each fact, checks similarity against existing facts and decides what to do.
  */
-async function saveFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection }) {
-  const embedding = await embed(content);
+async function saveFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection, embedding: precomputed }) {
+  const embedding = precomputed || await embed(content);
   const similar = await findSimilar(embedding, { namespace });
 
   if (!similar.length) {
@@ -38,10 +38,12 @@ async function saveFact({ content, category, confidence, importance, namespace, 
     const decision = await audmDecide(content, topMatch.content);
 
     if (decision === 'UPDATE') {
-      const oldContent = topMatch.content;
-      await updateFact(topMatch.id, { content, category, confidence, importance, sourceDocumentIds, embedding });
-      await recordHistory({ targetType: 'fact', targetId: topMatch.id, event: 'UPDATE', oldContent, newContent: content, triggeredBy: `audm:sim=${topMatch.similarity.toFixed(3)}` });
-      return { action: 'UPDATE', existingId: topMatch.id };
+      // Insert the new version, then mark the old one superseded with a closed valid_until.
+      // This preserves the full fact history as separate rows instead of overwriting in place.
+      const fact = await insertFact({ content, category, confidence, importance, namespace, sourceDocumentIds, sourceSection, embedding });
+      await markSuperseded(topMatch.id, fact.id);
+      await recordHistory({ targetType: 'fact', targetId: topMatch.id, event: 'UPDATE', oldContent: topMatch.content, newContent: content, triggeredBy: `audm:sim=${topMatch.similarity.toFixed(3)}` });
+      return { action: 'UPDATE', fact, supersededId: topMatch.id };
     }
 
     if (decision === 'CONTRADICT') {
@@ -60,7 +62,7 @@ async function audmDecide(newContent, existingContent) {
   const systemPrompt = await readFile(AUDM_PROMPT_PATH, 'utf8');
 
   const input = `${systemPrompt}\n\n**EXISTING FACT:** ${existingContent}\n\n**NEW FACT:** ${newContent}`;
-  const text = await llmPrompt(input, { model: config.llm.decisionModel });
+  const text = await llmPrompt(input, { model: config.llm.decisionModel, caller: 'audm' });
 
   const upper = text.trim().toUpperCase();
   if (upper.includes('UPDATE')) return 'UPDATE';

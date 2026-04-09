@@ -33,8 +33,9 @@ Output the JSON array directly, no explanation or wrapping.`;
 }
 
 function validateFacts(parsed, categories) {
-  if (!Array.isArray(parsed)) return [];
-  return parsed
+  const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.facts) ? parsed.facts : null;
+  if (!arr) return [];
+  return arr
     .filter((f) => f.content && categories.includes(f.category) && ['high', 'medium', 'low'].includes(f.confidence))
     .map((f) => ({
       ...f,

@@ -1,8 +1,8 @@
 {
-  "name": "cortex",
-  "version": "0.2.0",
+  "name": "@anmol-srv/cortex",
+  "version": "0.3.0",
   "type": "module",
-  "description": "Organizational memory and context layer for LLMs",
+  "description": "Persistent memory layer for Claude Code sessions — ingests documents, extracts facts, answers questions via MCP",
   "bin": {
     "cortex": "src/cli.js"
   },
@@ -16,11 +16,25 @@
     "migrate:rollback": "knex migrate:rollback",
     "migrate:make": "knex migrate:make"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "src/**/*.js",
+    "!src/**/*.test.js",
+    "!src/scripts/",
+    "prompts/",
+    "public/",
+    "knexfile.js"
+  ],
   "keywords": [
     "rag",
     "knowledge-base",
     "mcp",
     "llm",
+    "memory",
+    "claude",
+    "claude-code",
     "context-layer",
     "pgvector"
   ],

@@ -1,8 +1,5 @@
 import cortexDb from '../../db/cortex.js';
-
-// Minimum cosine similarity for facts to be considered relevant.
-// Below this threshold, facts are unrelated to the query even if they're the "best" in the DB.
-const MIN_FACT_SIMILARITY = 0.45;
+import config from '../../config.js';
 
 async function searchChunks(embedding, { namespaces, limit = 20 }) {
   const vec = `[${embedding.join(',')}]`;
@@ -39,7 +36,7 @@ async function searchFacts(embedding, { namespaces, limit = 20, minConfidence = 
     params.push(categories);
   }
 
-  params.push(vec, MIN_FACT_SIMILARITY, vec, limit);
+  params.push(vec, config.memory.minFactSimilarity, vec, limit);
 
   const { rows } = await cortexDb.raw(`
     SELECT id, uid, content, category, confidence, importance, namespace, status,

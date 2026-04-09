@@ -32,20 +32,29 @@ ${excerpts.join('\n')}
 Respond with a JSON array of ${chunks.length} context prefix strings.`;
 
   try {
-    const prefixes = await promptJson(fullPrompt, { model: config.llm.extractionModel });
+    const prefixes = await promptJson(fullPrompt, { model: config.llm.extractionModel, caller: 'contextualizer' });
 
-    if (!Array.isArray(prefixes)) {
+    // Model sometimes wraps the array in an object — unwrap any single array value
+    const resolvedPrefixes = Array.isArray(prefixes)
+      ? prefixes
+      : prefixes && typeof prefixes === 'object'
+        ? Object.values(prefixes).find((v) => Array.isArray(v)) ?? null
+        : null;
+
+    if (!resolvedPrefixes) {
       console.warn('[contextualizer] LLM did not return an array — skipping');
       return chunks;
     }
 
-    if (prefixes.length !== chunks.length) {
-      console.warn(`[contextualizer] Got ${prefixes.length} prefixes for ${chunks.length} chunks — using partial`);
+    const prefixList = resolvedPrefixes;
+
+    if (prefixList.length !== chunks.length) {
+      console.warn(`[contextualizer] Got ${prefixList.length} prefixes for ${chunks.length} chunks — using partial`);
     }
 
     return chunks.map((chunk, i) => ({
       ...chunk,
-      contextualPrefix: typeof prefixes[i] === 'string' ? prefixes[i] : null,
+      contextualPrefix: typeof prefixList[i] === 'string' ? prefixList[i] : null,
     }));
   } catch (err) {
     console.error('[contextualizer] Failed:', err.message);

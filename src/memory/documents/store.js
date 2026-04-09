@@ -12,7 +12,7 @@ async function findByUid(uid) {
   return doc || null;
 }
 
-async function upsert({ sourcePath, sourceType, title, contentHash, namespace }) {
+async function upsert({ sourcePath, sourceType, title = null, contentHash, namespace }) {
   const uid = `doc-${nanoid(16)}`;
 
   const { rows: [doc] } = await cortexDb.raw(`

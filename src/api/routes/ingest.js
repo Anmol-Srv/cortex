@@ -1,6 +1,7 @@
 import { ingestDocument } from '../../ingestion/pipeline.js';
 import { readSource } from '../../ingestion/sources/file.js';
 import { fetchSource } from '../../ingestion/sources/url.js';
+import * as jobs from '../../queue/jobs.js';
 import config from '../../config.js';
 import { AppError } from '../../lib/errors.js';
 
@@ -18,9 +19,10 @@ const ingestSchema = {
       metadata: { type: 'object' },
       skipFacts: { type: 'boolean', default: false },
       skipEntities: { type: 'boolean', default: false },
-      skipMarkdown: { type: 'boolean', default: false },
       categories: {},
       entities: {},
+      // async: true (default) returns jobId immediately; false blocks until done
+      async: { type: 'boolean', default: true },
     },
   },
 };
@@ -39,38 +41,33 @@ const batchSchema = {
   },
 };
 
-async function handleIngest(request) {
-  const {
-    content, url, filePath,
-    title, namespace, sourceType, sourcePath,
-    metadata,
-    skipFacts, skipEntities, skipMarkdown,
-    categories, entities,
-  } = request.body;
+// Resolve the source payload from request body (fetch URL / read file / use raw content)
+async function resolveSource(body) {
+  const { content, url, filePath, title, namespace, sourceType, sourcePath, metadata } = body;
 
   if (!content && !url && !filePath) {
     throw new AppError({ errorCode: 'BAD_REQUEST', message: 'content, url, or filePath required' });
   }
 
-  let source;
-  if (url) {
-    source = await fetchSource(url);
-  } else if (filePath) {
-    source = await readSource(filePath);
-  } else {
-    source = {
-      content,
-      title: title || 'Untitled',
-      sourcePath: sourcePath || `raw/${Date.now()}`,
-      sourceType: sourceType || 'raw',
-      contentType: 'text/plain',
-      metadata: metadata || {},
-    };
-  }
+  if (url) return fetchSource(url);
 
+  if (filePath) return readSource(filePath);
+
+  return {
+    content,
+    title: title || 'Untitled',
+    sourcePath: sourcePath || `raw/${Date.now()}`,
+    sourceType: sourceType || 'raw',
+    contentType: 'text/plain',
+    metadata: metadata || {},
+  };
+}
+
+async function runIngest(body, source) {
+  const { title, namespace, sourceType, sourcePath, metadata, skipFacts, skipEntities, categories, entities } = body;
   const ns = namespace || config.defaults.namespace;
 
-  const result = await ingestDocument({
+  return ingestDocument({
     content: source.content,
     title: title || source.title,
     sourcePath: sourcePath || source.sourcePath,
@@ -80,12 +77,44 @@ async function handleIngest(request) {
     metadata: { ...source.metadata, ...metadata },
     skipFacts,
     skipEntities,
-    skipMarkdown,
     categories,
     entities,
   });
+}
 
-  return result;
+async function handleIngest(request, reply) {
+  const source = await resolveSource(request.body);
+  const isAsync = request.body.async !== false;
+
+  if (!isAsync) {
+    // Synchronous mode — block and return full result (for CLI use, small content)
+    const result = await runIngest(request.body, source);
+    return result;
+  }
+
+  // Async mode — enqueue, return immediately
+  const jobId = jobs.create({ body: request.body, source });
+
+  setImmediate(async () => {
+    jobs.update(jobId, { status: 'running', startedAt: Date.now() });
+    try {
+      const result = await runIngest(request.body, source);
+      jobs.update(jobId, { status: 'completed', completedAt: Date.now(), result });
+    } catch (err) {
+      jobs.update(jobId, { status: 'failed', completedAt: Date.now(), error: err.message });
+    }
+  });
+
+  reply.code(202);
+  return { jobId, status: 'queued' };
+}
+
+async function handleJobStatus(request) {
+  const job = jobs.get(request.params.jobId);
+  if (!job) throw new AppError({ errorCode: 'NOT_FOUND', message: `Job ${request.params.jobId} not found` });
+  // Don't expose raw payload — just status + result
+  const { id, status, createdAt, startedAt, completedAt, result, error } = job;
+  return { id, status, createdAt, startedAt, completedAt, result, error };
 }
 
 async function handleBatchIngest(request) {
@@ -103,7 +132,6 @@ async function handleBatchIngest(request) {
         metadata: doc.metadata || {},
         skipFacts: doc.skipFacts || false,
         skipEntities: doc.skipEntities || false,
-        skipMarkdown: doc.skipMarkdown || false,
         categories: doc.categories,
         entities: doc.entities,
       });
@@ -118,6 +146,7 @@ async function handleBatchIngest(request) {
 
 async function ingestRoutes(app) {
   app.post('/api/ingest', { schema: ingestSchema }, handleIngest);
+  app.get('/api/ingest/jobs/:jobId', handleJobStatus);
   app.post('/api/ingest/batch', { schema: batchSchema }, handleBatchIngest);
 }
 

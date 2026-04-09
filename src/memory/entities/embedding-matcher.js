@@ -39,7 +39,7 @@ Consider if they refer to the same concept, person, or thing.
 
 Respond with ONLY: yes or no`;
 
-  const response = await llmPrompt(input, { model: config.llm.entityModel });
+  const response = await llmPrompt(input, { model: config.llm.entityModel, caller: 'entity-matcher' });
   return response.toLowerCase().includes('yes');
 }
 

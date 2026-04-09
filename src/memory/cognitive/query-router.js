@@ -40,7 +40,7 @@ Query: ${query}
 Respond with ONLY a JSON object: { "intent": "preference|factual|entity_lookup|exploratory|temporal", "categories": [...], "entities": [...], "expand": bool, "pointInTime": null or "YYYY-MM-DD", "reasoning": "..." }`;
 
   try {
-    const result = await promptJson(input, { model: config.llm.extractionModel });
+    const result = await promptJson(input, { model: config.llm.extractionModel, caller: 'query-router' });
 
     if (!result || !VALID_INTENTS.includes(result.intent)) {
       const fb = buildDecision('factual', {});
